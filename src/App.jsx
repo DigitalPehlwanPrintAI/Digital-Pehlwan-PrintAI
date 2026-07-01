@@ -3,13 +3,23 @@ import "./App.css";
 
 function App() {
   const [image, setImage] = useState(null);
+  const [imageSize, setImageSize] = useState(null);
 
   function handleImageUpload(event) {
     const file = event.target.files[0];
+    if (!file) return;
 
-    if (file) {
-      setImage(URL.createObjectURL(file));
-    }
+    const imageUrl = URL.createObjectURL(file);
+    setImage(imageUrl);
+
+    const img = new Image();
+    img.onload = function () {
+      setImageSize({
+        width: img.width,
+        height: img.height,
+      });
+    };
+    img.src = imageUrl;
   }
 
   return (
@@ -30,29 +40,16 @@ function App() {
       />
 
       {image && (
-        <>
-          <div className="preview-box">
-            <h2>Image Preview</h2>
-            <img src={image} alt="Uploaded preview" />
-          </div>
+        <div className="preview-box">
+          <img src={image} alt="Preview" />
 
-          <div className="tools-box">
-            <h2>AI Print Tools</h2>
-
-            <div className="tool-grid">
-              <button>Remove Background</button>
-              <button>HD Upscale</button>
-              <button>CMYK Convert</button>
-              <button>Vector Text Detect</button>
-              <button>300 DPI Setup</button>
-              <button>Print Size Check</button>
+          {imageSize && (
+            <div className="analysis-box">
+              <h2>Original Image Pixel Size</h2>
+              <p>{imageSize.width} × {imageSize.height} px</p>
             </div>
-
-            <button className="generate-btn">
-              Generate Print Ready PDF
-            </button>
-          </div>
-        </>
+          )}
+        </div>
       )}
     </div>
   );
