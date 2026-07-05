@@ -430,3 +430,60 @@ async def smart_analyze(file: UploadFile = File(...)):
         "colors": ["#ffffff", "#000000"],
         "font": "Detected basic",
     }
+from fastapi import UploadFile, File, HTTPException
+from fastapi.responses import Response
+
+@app.post("/smart-edit/inpaint")
+async def smart_inpaint(
+    file: UploadFile = File(...),
+    mask: UploadFile = File(...)
+):
+    try:
+        import io
+        import numpy as np
+        import cv2
+        from PIL import Image
+
+        image_bytes = await file.read()
+        mask_bytes = await mask.read()
+
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        mask_image = Image.open(io.BytesIO(mask_bytes)).convert("L")
+
+        image_np = np.array(image)
+        mask_np = np.array(mask_image)
+
+        # Mask ko binary banao
+        _, mask_np = cv2.threshold(mask_np, 20, 255, cv2.THRESH_BINARY)
+
+        if cv2.countNonZero(mask_np) == 0:
+            raise HTTPException(status_code=400, detail="No painted area found")
+
+        # Mask ko thoda expand karo taaki object/text edges bhi remove ho
+        kernel = np.ones((5, 5), np.uint8)
+        mask_np = cv2.dilate(mask_np, kernel, iterations=1)
+
+        image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+
+        # Object/Text remove using OpenCV inpainting
+        result_bgr = cv2.inpaint(
+            image_bgr,
+            mask_np,
+            7,
+            cv2.INPAINT_TELEA
+        )
+
+        result_rgb = cv2.cvtColor(result_bgr, cv2.COLOR_BGR2RGB)
+        result_image = Image.fromarray(result_rgb)
+
+        buffer = io.BytesIO()
+        result_image.save(buffer, format="PNG")
+        buffer.seek(0)
+
+        return Response(content=buffer.getvalue(), media_type="image/png")
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
