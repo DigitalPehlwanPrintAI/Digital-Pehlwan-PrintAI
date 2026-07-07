@@ -9,6 +9,10 @@ import zipfile
 import struct
 import math
 
+# Render/Cloud par rembg model download ke liye writable folder
+os.environ.setdefault("U2NET_HOME", "/tmp/.u2net")
+os.makedirs(os.environ["U2NET_HOME"], exist_ok=True)
+
 app = FastAPI(title="Digital Pehlwan PrintAI Backend")
 
 app.add_middleware(
@@ -919,19 +923,33 @@ async def smart_repair(
 
 @app.post("/smart-edit/remove-bg")
 async def remove_bg(file: UploadFile = File(...)):
-    input_bytes = await file.read()
+    """
+    Real background removal endpoint.
 
+    Important:
+    Purane code me agar rembg fail hota tha to backend original image PNG
+    wapas bhej deta tha. Isliye frontend par lagta tha ki button kaam kar raha
+    hai, lekin background remove nahi hota tha.
+
+    Ab agar rembg fail hoga to clear 500 error milega, taaki issue hide na ho.
+    Render free instance ke liye lightweight u2netp model use kiya gaya hai.
+    """
     try:
-        from rembg import remove
-        output_bytes = remove(input_bytes)
+        input_bytes = await file.read()
+
+        from rembg import remove, new_session
+
+        # u2netp lightweight model Render Free par zyada stable hai.
+        session = new_session("u2netp")
+        output_bytes = remove(input_bytes, session=session)
+
         return Response(content=output_bytes, media_type="image/png")
 
-    except Exception:
-        image = Image.open(io.BytesIO(input_bytes)).convert("RGBA")
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        buffer.seek(0)
-        return Response(content=buffer.getvalue(), media_type="image/png")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Background removal failed: {str(e)}",
+        )
 
 
 @app.post("/smart-edit/replace-bg")

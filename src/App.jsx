@@ -6,6 +6,7 @@ import ImageInfo from "./components/ImageInfo.jsx";
 import SmartEditing from "./SmartEditing.jsx";
 import SmartPrintStudio from "./components/SmartPrintStudio.jsx";
 import SmartBatchStudio from "./components/SmartBatchStudio.jsx";
+import TopMenu from "./components/TopMenu.jsx";
 
 function App() {
   const [tab, setTab] = useState("importexport");
@@ -53,7 +54,7 @@ function App() {
     formData.append("target_width_px", targetWidthPx);
     formData.append("target_height_px", targetHeightPx);
 
-    const response = await fetch("http://127.0.0.1:8000/analyze-quality", {
+    const response = await fetch("https://digital-pehlwan-printai.onrender.com/analyze-quality", {
       method: "POST",
       body: formData,
     });
@@ -90,7 +91,7 @@ function App() {
     const formData = new FormData();
     formData.append("file", file);
 
-    const response = await fetch("http://127.0.0.1:8000/process", {
+    const response = await fetch("https://digital-pehlwan-printai.onrender.com/process", {
       method: "POST",
       body: formData,
     });
@@ -162,7 +163,7 @@ function App() {
     formData.append("height_px", required.heightPx);
     formData.append("purpose", purpose);
 
-    const response = await fetch("http://127.0.0.1:8000/resize", {
+    const response = await fetch("https://digital-pehlwan-printai.onrender.com/resize", {
       method: "POST",
       body: formData,
     });
@@ -221,7 +222,7 @@ function App() {
     formData.append("strength", improveStrength);
     formData.append("export_dpi", finalDpi);
 
-    const response = await fetch("http://127.0.0.1:8000/improve-quality", {
+    const response = await fetch("https://digital-pehlwan-printai.onrender.com/improve-quality", {
       method: "POST",
       body: formData,
     });
@@ -264,7 +265,7 @@ function App() {
     formData.append("custom_width", String(widthPx || 0));
     formData.append("custom_height", String(heightPx || 0));
 
-    const response = await fetch("http://127.0.0.1:8000/import-export/export-image", {
+    const response = await fetch("https://digital-pehlwan-printai.onrender.com/import-export/export-image", {
       method: "POST",
       body: formData,
     });
@@ -343,7 +344,7 @@ function App() {
     formData.append("file", selectedFile);
     formData.append("mode", "auto");
 
-    const response = await fetch("http://127.0.0.1:8000/smart-repair", {
+    const response = await fetch("https://digital-pehlwan-printai.onrender.com/smart-repair", {
       method: "POST",
       body: formData,
     });
@@ -370,7 +371,7 @@ function App() {
     formData.append("noise_reduction", repairNoise);
     formData.append("upscale", repairUpscale);
 
-    const response = await fetch("http://127.0.0.1:8000/smart-repair", {
+    const response = await fetch("https://digital-pehlwan-printai.onrender.com/smart-repair", {
       method: "POST",
       body: formData,
     });
@@ -442,19 +443,7 @@ function App() {
 
   return (
     <div className="app">
-      <h1>Digital Pehlwan PrintAI</h1>
-      <p>Version 0.9 Beta • From AI Images to Print-Ready Artwork</p>
-
-      <div className="analysis-box center">
-        <h2>PrintAI Beta Workspace</h2>
-        <p>
-          Founder: <b>Monika Hingle</b> • The Brand Builders
-        </p>
-        <p>
-          Mission: हर designer, print shop और creative professional को AI की मदद से
-          professional print-ready artwork मिनटों में उपलब्ध कराना।
-        </p>
-      </div>
+      <TopMenu />
 
       <div className="tab-box">
         <button

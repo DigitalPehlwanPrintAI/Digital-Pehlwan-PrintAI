@@ -6,7 +6,7 @@ import PickerStudio from "./components/PickerStudio.jsx";
 import OCRFontDetector from "./components/OCRFontDetector.jsx";
 import LogoStudio from "./components/LogoStudio.jsx";
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = "https://digital-pehlwan-printai.onrender.com";
 
 function SmartEditing({ selectedFile, image }) {
   const [editImage, setEditImage] = useState(null);

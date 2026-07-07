@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = "https://digital-pehlwan-printai.onrender.com";
 
 const EXPORT_FORMATS = [
   { key: "png", label: "PNG", note: "Transparent PNG" },

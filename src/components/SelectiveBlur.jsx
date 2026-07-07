@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = "https://digital-pehlwan-printai.onrender.com";
 
 function SelectiveBlur({ selectedFile, image }) {
   const canvasRef = useRef(null);
