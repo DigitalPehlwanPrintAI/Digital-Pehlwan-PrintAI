@@ -1,10 +1,15 @@
+import ImportExportStudio from "./components/ImportExportStudio";
+import SplashScreen from "./components/SplashScreen.jsx";
 import { useState } from "react";
 import "./App.css";
 import ImageInfo from "./components/ImageInfo.jsx";
 import SmartEditing from "./SmartEditing.jsx";
+import SmartPrintStudio from "./components/SmartPrintStudio.jsx";
+import SmartBatchStudio from "./components/SmartBatchStudio.jsx";
 
 function App() {
-  const [tab, setTab] = useState("analysis");
+  const [tab, setTab] = useState("importexport");
+  const [showSplash, setShowSplash] = useState(true);
 
   const [selectedFile, setSelectedFile] = useState(null);
   const [image, setImage] = useState(null);
@@ -240,6 +245,45 @@ function App() {
     setImprovedQualityReport(report);
   }
 
+  function getExportExtension(format) {
+    if (format === "jpeg") return "jpg";
+    if (format === "cdr") return "zip";
+    return format;
+  }
+
+  async function exportWithModuleOneEngine({ file, format, fileNamePrefix, widthPx = 0, heightPx = 0, dpiValue = finalDpi }) {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("export_format", format);
+    formData.append("quality", "98");
+    formData.append("dpi", String(dpiValue));
+    formData.append("color_mode", "RGB");
+    formData.append("background_mode", format === "jpg" || format === "jpeg" || format === "pdf" ? "white" : "transparent");
+    formData.append("custom_bg", "#ffffff");
+    formData.append("resize_mode", widthPx > 0 && heightPx > 0 ? "custom" : "original");
+    formData.append("custom_width", String(widthPx || 0));
+    formData.append("custom_height", String(heightPx || 0));
+
+    const response = await fetch("http://127.0.0.1:8000/import-export/export-image", {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => null);
+      throw new Error(errorData?.detail || "Export failed");
+    }
+
+    const blob = await response.blob();
+    const extension = getExportExtension(format);
+    const fileName =
+      format === "cdr"
+        ? `${fileNamePrefix}_corel_compatible_files.zip`
+        : `${fileNamePrefix}_${dpiValue}dpi.${extension}`;
+
+    downloadBlob(blob, fileName);
+  }
+
   async function handleExportOriginalSizedFile(format) {
     if (!selectedFile) {
       alert("Please upload image first");
@@ -253,21 +297,18 @@ function App() {
       return;
     }
 
-    const formData = new FormData();
-    formData.append("file", selectedFile);
-    formData.append("width_px", required.widthPx);
-    formData.append("height_px", required.heightPx);
-    formData.append("purpose", purpose);
-    formData.append("output_format", format);
-    formData.append("export_dpi", finalDpi);
-
-    const response = await fetch("http://127.0.0.1:8000/export-file", {
-      method: "POST",
-      body: formData,
-    });
-
-    const blob = await response.blob();
-    downloadBlob(blob, `print-ready-${purpose}-${finalDpi}dpi.${format}`);
+    try {
+      await exportWithModuleOneEngine({
+        file: selectedFile,
+        format,
+        fileNamePrefix: `print-ready-${purpose}`,
+        widthPx: required.widthPx,
+        heightPx: required.heightPx,
+        dpiValue: finalDpi,
+      });
+    } catch (error) {
+      alert("Export Error: " + error.message);
+    }
   }
 
   async function handleExportImprovedFile(format) {
@@ -276,22 +317,20 @@ function App() {
       return;
     }
 
-    const improvedFile = new File([improvedBlob], "improved-image.jpg", {
-      type: "image/jpeg",
+    const improvedFile = new File([improvedBlob], "improved-image.png", {
+      type: "image/png",
     });
 
-    const formData = new FormData();
-    formData.append("file", improvedFile);
-    formData.append("output_format", format);
-    formData.append("export_dpi", finalDpi);
-
-    const response = await fetch("http://127.0.0.1:8000/export-improved-file", {
-      method: "POST",
-      body: formData,
-    });
-
-    const blob = await response.blob();
-    downloadBlob(blob, `improved-${purpose}-${finalDpi}dpi.${format}`);
+    try {
+      await exportWithModuleOneEngine({
+        file: improvedFile,
+        format,
+        fileNamePrefix: `improved-${purpose}`,
+        dpiValue: finalDpi,
+      });
+    } catch (error) {
+      alert("Export Error: " + error.message);
+    }
   }
 
   async function handleAutoRepair() {
@@ -350,25 +389,20 @@ function App() {
       return;
     }
 
-    const repairedFile = new File([repairedBlob], "smart-repair.jpg", {
-      type: "image/jpeg",
+    const repairedFile = new File([repairedBlob], "smart-repair.png", {
+      type: "image/png",
     });
 
-    const formData = new FormData();
-    formData.append("file", repairedFile);
-    formData.append("output_format", formatToDownload);
-    formData.append("export_dpi", repairExportDpi);
-
-    const response = await fetch("http://127.0.0.1:8000/export-improved-file", {
-      method: "POST",
-      body: formData,
-    });
-
-    const blob = await response.blob();
-    downloadBlob(
-      blob,
-      `${repairMode === "manual" ? "manual-repair" : "auto-repair"}-${repairExportDpi}dpi.${formatToDownload}`
-    );
+    try {
+      await exportWithModuleOneEngine({
+        file: repairedFile,
+        format: formatToDownload,
+        fileNamePrefix: repairMode === "manual" ? "manual-repair" : "auto-repair",
+        dpiValue: repairExportDpi,
+      });
+    } catch (error) {
+      alert("Export Error: " + error.message);
+    }
   }
 
   function downloadBlob(blob, fileName) {
@@ -399,15 +433,37 @@ function App() {
     };
   }
 
+  if (showSplash) {
+    return <SplashScreen onFinish={() => setShowSplash(false)} />;
+  }
+
   const required = calculateRequiredPixels();
   const improvement = getImprovementText();
 
   return (
     <div className="app">
       <h1>Digital Pehlwan PrintAI</h1>
-      <p>Professional Print Analysis + Smart Repair System</p>
+      <p>Version 0.9 Beta • From AI Images to Print-Ready Artwork</p>
+
+      <div className="analysis-box center">
+        <h2>PrintAI Beta Workspace</h2>
+        <p>
+          Founder: <b>Monika Hingle</b> • The Brand Builders
+        </p>
+        <p>
+          Mission: हर designer, print shop और creative professional को AI की मदद से
+          professional print-ready artwork मिनटों में उपलब्ध कराना।
+        </p>
+      </div>
 
       <div className="tab-box">
+        <button
+          className={tab === "importexport" ? "tab-btn active-tab" : "tab-btn"}
+          onClick={() => setTab("importexport")}
+        >
+          Smart Studio
+        </button>
+
         <button
           className={tab === "analysis" ? "tab-btn active-tab" : "tab-btn"}
           onClick={() => setTab("analysis")}
@@ -428,21 +484,41 @@ function App() {
         >
           Smart Editing
         </button>
+
+        <button
+          className={tab === "print" ? "tab-btn active-tab" : "tab-btn"}
+          onClick={() => setTab("print")}
+        >
+          Smart Print Studio
+        </button>
+
+        <button
+          className={tab === "batch" ? "tab-btn active-tab" : "tab-btn"}
+          onClick={() => setTab("batch")}
+        >
+          Smart Batch Studio
+        </button>
       </div>
 
-      <label htmlFor="imageUpload" className="upload-btn">
-        Upload Image
-      </label>
+      {!["importexport", "print", "batch"].includes(tab) && (
+        <>
+          <label htmlFor="imageUpload" className="upload-btn">
+            Upload Image
+          </label>
 
-      <input
-        id="imageUpload"
-        type="file"
-        accept="image/*"
-        onChange={handleImageUpload}
-        hidden
-      />
+          <input
+            id="imageUpload"
+            type="file"
+            accept="image/*"
+            onChange={handleImageUpload}
+            hidden
+          />
+        </>
+      )}
 
-      {!image && (
+      {tab === "importexport" && <ImportExportStudio />}
+
+      {!["importexport", "print", "batch"].includes(tab) && !image && (
         <div className="analysis-box">
           <h2>Upload image to start</h2>
           <p>Please upload JPG, PNG or JPEG image for analysis and repair.</p>
@@ -703,6 +779,13 @@ function App() {
                       <option value="png">PNG</option>
                       <option value="jpg">JPG</option>
                       <option value="jpeg">JPEG</option>
+                      <option value="webp">WEBP</option>
+                      <option value="tiff">TIFF</option>
+                      <option value="bmp">BMP</option>
+                      <option value="svg">SVG</option>
+                      <option value="eps">EPS</option>
+                      <option value="psd">PSD</option>
+                      <option value="cdr">Corel ZIP</option>
                     </select>
 
                     <button
@@ -719,8 +802,8 @@ function App() {
                       Download Print Ready {finalFormat.toUpperCase()}
                     </button>
 
-                    <p>PSD Export: Coming Soon</p>
-                    <p>CDR Export: Coming Soon</p>
+                    <p>PSD Export: Working as flattened PSD.</p>
+                    <p>Corel ZIP: Working as SVG + PDF + EPS + TIFF + PNG package.</p>
                   </>
                 )}
               </>
@@ -849,6 +932,13 @@ function App() {
                 <option value="jpeg">JPEG</option>
                 <option value="png">PNG</option>
                 <option value="pdf">PDF</option>
+                <option value="webp">WEBP</option>
+                <option value="tiff">TIFF</option>
+                <option value="bmp">BMP</option>
+                <option value="svg">SVG</option>
+                <option value="eps">EPS</option>
+                <option value="psd">PSD</option>
+                <option value="cdr">Corel ZIP</option>
               </select>
 
               <button
@@ -858,8 +948,8 @@ function App() {
                 Download Selected Format
               </button>
 
-              <p>PSD Export: Coming Soon</p>
-              <p>CDR Export: Coming Soon</p>
+              <p>PSD Export: Working as flattened PSD.</p>
+              <p>Corel ZIP: Working as SVG + PDF + EPS + TIFF + PNG package.</p>
             </div>
           )}
         </div>
@@ -868,6 +958,15 @@ function App() {
       {tab === "edit" && (
         <SmartEditing selectedFile={selectedFile} image={image} />
       )}
+
+      {tab === "print" && <SmartPrintStudio />}
+
+      {tab === "batch" && <SmartBatchStudio />}
+
+      <div className="analysis-box center">
+        <p><b>Digital Pehlwan PrintAI</b> • Version 0.9 Beta</p>
+        <p>© 2026 Digital Pehlwan • Founder: Monika Hingle • The Brand Builders</p>
+      </div>
 
     </div>
   );

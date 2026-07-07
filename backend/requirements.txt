@@ -1,4 +1,10 @@
 fastapi
 uvicorn
-pillow
 python-multipart
+pillow
+opencv-python-headless
+numpy
+rembg
+onnxruntime
+reportlab
+cairosvg

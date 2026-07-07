@@ -3,6 +3,8 @@ import SelectiveBlur from "./components/SelectiveBlur.jsx";
 import MagicEraser from "./components/MagicEraser.jsx";
 import ObjectTextRemover from "./components/ObjectTextRemover.jsx";
 import PickerStudio from "./components/PickerStudio.jsx";
+import OCRFontDetector from "./components/OCRFontDetector.jsx";
+import LogoStudio from "./components/LogoStudio.jsx";
 
 const API_BASE = "http://127.0.0.1:8000";
 
@@ -18,6 +20,7 @@ function SmartEditing({ selectedFile, image }) {
   const [gradientTwo, setGradientTwo] = useState("#007bff");
   const [gradientDirection, setGradientDirection] = useState("horizontal");
 
+  const [bgDesign, setBgDesign] = useState("none");
   const [bgFile, setBgFile] = useState(null);
   const [bgPreview, setBgPreview] = useState(null);
 
@@ -53,31 +56,35 @@ function SmartEditing({ selectedFile, image }) {
     });
   }
 
-  async function handleRemoveBackground() {
+  async function removeBgAndGetBlob() {
+    if (editBlob) return editBlob;
+
     const file = getFile();
-    if (!file) return;
+    if (!file) return null;
 
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const response = await fetch(`${API_BASE}/smart-edit/remove-bg`, {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!response.ok) {
+      alert("Remove Background Error: " + (await response.text()));
+      return null;
+    }
+
+    const blob = await response.blob();
+    setEditBlob(blob);
+    setEditImage(URL.createObjectURL(blob));
+    return blob;
+  }
+
+  async function handleRemoveBackground() {
     setLoading(true);
-
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const response = await fetch(`${API_BASE}/smart-edit/remove-bg`, {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!response.ok) {
-        alert("Remove Background Error: " + (await response.text()));
-        return;
-      }
-
-      const blob = await response.blob();
-      setEditBlob(blob);
-      setEditImage(URL.createObjectURL(blob));
-    } catch (error) {
-      alert("Remove Background Error: " + error.message);
+      await removeBgAndGetBlob();
     } finally {
       setLoading(false);
     }
@@ -91,22 +98,10 @@ function SmartEditing({ selectedFile, image }) {
     if (position === "bottom") y = canvasH - imgH;
     if (position === "left") x = 0;
     if (position === "right") x = canvasW - imgW;
-    if (position === "top-left") {
-      x = 0;
-      y = 0;
-    }
-    if (position === "top-right") {
-      x = canvasW - imgW;
-      y = 0;
-    }
-    if (position === "bottom-left") {
-      x = 0;
-      y = canvasH - imgH;
-    }
-    if (position === "bottom-right") {
-      x = canvasW - imgW;
-      y = canvasH - imgH;
-    }
+    if (position === "top-left") { x = 0; y = 0; }
+    if (position === "top-right") { x = canvasW - imgW; y = 0; }
+    if (position === "bottom-left") { x = 0; y = canvasH - imgH; }
+    if (position === "bottom-right") { x = canvasW - imgW; y = canvasH - imgH; }
 
     return { x, y };
   }
@@ -124,21 +119,83 @@ function SmartEditing({ selectedFile, image }) {
 
     gradient.addColorStop(0, gradientOne);
     gradient.addColorStop(1, gradientTwo);
-
     ctx.fillStyle = gradient;
     ctx.fillRect(0, 0, width, height);
   }
 
-  async function applyBackgroundStudio() {
-    if (!editBlob) {
-      alert("Please remove background first");
-      return;
+  function drawDesign(ctx, width, height) {
+    if (bgDesign === "none") return;
+
+    ctx.save();
+
+    if (bgDesign === "dots") {
+      ctx.fillStyle = "rgba(0,0,0,0.12)";
+      for (let x = 20; x < width; x += 40) {
+        for (let y = 20; y < height; y += 40) {
+          ctx.beginPath();
+          ctx.arc(x, y, 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
     }
 
+    if (bgDesign === "grid") {
+      ctx.strokeStyle = "rgba(0,0,0,0.12)";
+      ctx.lineWidth = 1;
+      for (let x = 0; x < width; x += 40) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, height);
+        ctx.stroke();
+      }
+      for (let y = 0; y < height; y += 40) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(width, y);
+        ctx.stroke();
+      }
+    }
+
+    if (bgDesign === "diagonal") {
+      ctx.strokeStyle = "rgba(0,0,0,0.14)";
+      ctx.lineWidth = 3;
+      for (let i = -height; i < width; i += 45) {
+        ctx.beginPath();
+        ctx.moveTo(i, height);
+        ctx.lineTo(i + height, 0);
+        ctx.stroke();
+      }
+    }
+
+    if (bgDesign === "soft-circles") {
+      for (let i = 0; i < 12; i++) {
+        const x = Math.random() * width;
+        const y = Math.random() * height;
+        const r = Math.min(width, height) * (0.08 + Math.random() * 0.12);
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, "rgba(255,255,255,0.35)");
+        g.addColorStop(1, "rgba(255,255,255,0)");
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    ctx.restore();
+  }
+
+  async function applyBackgroundStudio() {
     setLoading(true);
 
     try {
-      const foreground = await loadImageFromBlob(editBlob);
+      const foregroundBlob = await removeBgAndGetBlob();
+      if (!foregroundBlob) {
+        setLoading(false);
+        return;
+      }
+
+      const foreground = await loadImageFromBlob(foregroundBlob);
 
       let canvasWidth = foreground.width;
       let canvasHeight = foreground.height;
@@ -175,6 +232,8 @@ function SmartEditing({ selectedFile, image }) {
         ctx.drawImage(background, 0, 0, canvasWidth, canvasHeight);
       }
 
+      drawDesign(ctx, canvasWidth, canvasHeight);
+
       let fgW = foreground.width;
       let fgH = foreground.height;
 
@@ -200,7 +259,6 @@ function SmartEditing({ selectedFile, image }) {
       }
 
       const { x, y } = getPositionXY(canvasWidth, canvasHeight, fgW, fgH);
-
       ctx.drawImage(foreground, x, y, fgW, fgH);
 
       canvas.toBlob((blob) => {
@@ -260,11 +318,9 @@ function SmartEditing({ selectedFile, image }) {
 
     const url = URL.createObjectURL(editBlob);
     const link = document.createElement("a");
-
     link.href = url;
     link.download = "smart-editing-output.png";
     link.click();
-
     URL.revokeObjectURL(url);
   }
 
@@ -272,9 +328,10 @@ function SmartEditing({ selectedFile, image }) {
     <div className="preview-box">
       <div className="analysis-box">
         <h2>Module 3: Smart Editing</h2>
+
         <p>
-          Remove Background • Background Studio • Selective Blur • Object/Text
-          Remover • Picker Studio
+          Remove Background • Background Studio • Picker Studio • Logo Studio •
+          OCR + Font Detection • Selective Blur • Magic Eraser • Object/Text Remover
         </p>
 
         {editImage && <img src={editImage} alt="Smart Editing Preview" />}
@@ -338,11 +395,7 @@ function SmartEditing({ selectedFile, image }) {
         {bgMode === "image" && (
           <>
             <label>Upload Background Image</label>
-            <input
-              type="file"
-              accept="image/*"
-              onChange={handleBackgroundUpload}
-            />
+            <input type="file" accept="image/*" onChange={handleBackgroundUpload} />
 
             {bgPreview && (
               <>
@@ -352,6 +405,15 @@ function SmartEditing({ selectedFile, image }) {
             )}
           </>
         )}
+
+        <label>Background Design</label>
+        <select value={bgDesign} onChange={(e) => setBgDesign(e.target.value)}>
+          <option value="none">No Design</option>
+          <option value="dots">Dots Pattern</option>
+          <option value="grid">Grid Pattern</option>
+          <option value="diagonal">Diagonal Lines</option>
+          <option value="soft-circles">Soft Circles</option>
+        </select>
 
         <hr />
 
@@ -390,14 +452,14 @@ function SmartEditing({ selectedFile, image }) {
           Apply Background Studio
         </button>
 
+        <button className="upload-btn" onClick={downloadImage}>
+          Download Edited PNG
+        </button>
+
         <hr />
 
         <button className="upload-btn" onClick={handleAnalyze}>
           Analyze Object / Text / Logo
-        </button>
-
-        <button className="upload-btn" onClick={downloadImage}>
-          Download Edited PNG
         </button>
 
         {analysis && (
@@ -419,6 +481,14 @@ function SmartEditing({ selectedFile, image }) {
 
       <div className="analysis-box">
         <PickerStudio selectedFile={selectedFile} image={image} />
+      </div>
+
+      <div className="analysis-box">
+        <LogoStudio selectedFile={selectedFile} image={image} />
+      </div>
+
+      <div className="analysis-box">
+        <OCRFontDetector selectedFile={selectedFile} image={image} />
       </div>
 
       <div className="analysis-box">
