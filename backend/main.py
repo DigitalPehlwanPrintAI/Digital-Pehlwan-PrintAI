@@ -9,10 +9,6 @@ import zipfile
 import struct
 import math
 
-# Render/Cloud par rembg model download ke liye writable folder
-os.environ.setdefault("U2NET_HOME", "/tmp/.u2net")
-os.makedirs(os.environ["U2NET_HOME"], exist_ok=True)
-
 app = FastAPI(title="Digital Pehlwan PrintAI Backend")
 
 app.add_middleware(
@@ -921,35 +917,78 @@ async def smart_repair(
     return Response(content=output.getvalue(), media_type="image/jpeg")
 
 
+def _simple_corner_background_remove(image, tolerance=55, feather=1):
+    """
+    Fast CPU-safe background removal for beta hosting.
+    It removes background similar to corner colors. Works best on white/plain backgrounds.
+    This avoids rembg model download hanging on Render Free.
+    """
+    image = image.convert("RGBA")
+    width, height = image.size
+    pixels = image.load()
+
+    sample_points = [
+        (0, 0),
+        (max(0, width - 1), 0),
+        (0, max(0, height - 1)),
+        (max(0, width - 1), max(0, height - 1)),
+        (width // 2, 0),
+        (width // 2, max(0, height - 1)),
+        (0, height // 2),
+        (max(0, width - 1), height // 2),
+    ]
+
+    samples = []
+    for x, y in sample_points:
+        r, g, b, a = pixels[x, y]
+        samples.append((r, g, b))
+
+    bg_r = sorted([c[0] for c in samples])[len(samples) // 2]
+    bg_g = sorted([c[1] for c in samples])[len(samples) // 2]
+    bg_b = sorted([c[2] for c in samples])[len(samples) // 2]
+
+    result = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    result_pixels = result.load()
+
+    for y in range(height):
+        for x in range(width):
+            r, g, b, a = pixels[x, y]
+            dist = math.sqrt((r - bg_r) ** 2 + (g - bg_g) ** 2 + (b - bg_b) ** 2)
+
+            if dist <= tolerance:
+                new_a = 0
+            elif dist <= tolerance + 35:
+                new_a = int(255 * ((dist - tolerance) / 35))
+            else:
+                new_a = a
+
+            result_pixels[x, y] = (r, g, b, new_a)
+
+    if feather > 0:
+        alpha = result.getchannel("A").filter(ImageFilter.GaussianBlur(radius=feather))
+        result.putalpha(alpha)
+
+    return result
+
+
 @app.post("/smart-edit/remove-bg")
 async def remove_bg(file: UploadFile = File(...)):
-    """
-    Real background removal endpoint.
-
-    Important:
-    Purane code me agar rembg fail hota tha to backend original image PNG
-    wapas bhej deta tha. Isliye frontend par lagta tha ki button kaam kar raha
-    hai, lekin background remove nahi hota tha.
-
-    Ab agar rembg fail hoga to clear 500 error milega, taaki issue hide na ho.
-    Render free instance ke liye lightweight u2netp model use kiya gaya hai.
-    """
     try:
         input_bytes = await file.read()
+        image = Image.open(io.BytesIO(input_bytes)).convert("RGBA")
 
-        from rembg import remove, new_session
+        # Render Free par rembg model download/load hang ho sakta hai.
+        # Isliye beta version me fast CPU-safe background remover use kar rahe hain.
+        result = _simple_corner_background_remove(image, tolerance=55, feather=1)
 
-        # u2netp lightweight model Render Free par zyada stable hai.
-        session = new_session("u2netp")
-        output_bytes = remove(input_bytes, session=session)
+        buffer = io.BytesIO()
+        result.save(buffer, format="PNG")
+        buffer.seek(0)
 
-        return Response(content=output_bytes, media_type="image/png")
+        return Response(content=buffer.getvalue(), media_type="image/png")
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Background removal failed: {str(e)}",
-        )
+        raise HTTPException(status_code=500, detail=f"Remove background failed: {str(e)}")
 
 
 @app.post("/smart-edit/replace-bg")
