@@ -6,7 +6,7 @@ import PickerStudio from "./components/PickerStudio.jsx";
 import OCRFontDetector from "./components/OCRFontDetector.jsx";
 import LogoStudio from "./components/LogoStudio.jsx";
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = "https://digital-pehlwan-printai.onrender.com";
 
 function SmartEditing({ selectedFile, image }) {
   const [editImage, setEditImage] = useState(null);
@@ -28,15 +28,20 @@ function SmartEditing({ selectedFile, image }) {
   const [position, setPosition] = useState("center");
   const [zoom, setZoom] = useState(100);
 
+  const [bgFitMode, setBgFitMode] = useState("cover");
+  const [bgPosition, setBgPosition] = useState("center");
+
   const [removeMode, setRemoveMode] = useState("ai-pro");
   const [removeTolerance, setRemoveTolerance] = useState(55);
-  const [edgeFeather, setEdgeFeather] = useState(1);
+  const [edgeFeather, setEdgeFeather] = useState(0);
   const [removeStatus, setRemoveStatus] = useState("");
 
   useEffect(() => {
     if (image) {
       setEditImage(image);
       setEditBlob(null);
+      setAnalysis(null);
+      setRemoveStatus("");
     }
   }, [image]);
 
@@ -49,106 +54,30 @@ function SmartEditing({ selectedFile, image }) {
   function loadImageFromBlob(blob) {
     return new Promise((resolve, reject) => {
       const img = new Image();
-      img.onload = () => resolve(img);
+      const url = URL.createObjectURL(blob);
+
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        resolve(img);
+      };
+
       img.onerror = reject;
-      img.src = URL.createObjectURL(blob);
+      img.src = url;
     });
   }
 
   function loadImageFromFile(file) {
     return new Promise((resolve, reject) => {
       const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = reject;
-      img.src = URL.createObjectURL(file);
-    });
-  }
+      const url = URL.createObjectURL(file);
 
-  function blobToImage(blob) {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      const url = URL.createObjectURL(blob);
       img.onload = () => {
         URL.revokeObjectURL(url);
         resolve(img);
       };
+
       img.onerror = reject;
       img.src = url;
-    });
-  }
-
-  function imageDataHasTransparency(imageData) {
-    const data = imageData.data;
-    for (let i = 3; i < data.length; i += 4) {
-      if (data[i] < 250) return true;
-    }
-    return false;
-  }
-
-  async function removeLightBackgroundFallback(blob) {
-    const img = await blobToImage(blob);
-
-    const canvas = document.createElement("canvas");
-    canvas.width = img.width;
-    canvas.height = img.height;
-
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(img, 0, 0);
-
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-    if (imageDataHasTransparency(imageData)) {
-      return blob;
-    }
-
-    const data = imageData.data;
-    const w = canvas.width;
-    const h = canvas.height;
-
-    function getPixel(x, y) {
-      const i = (y * w + x) * 4;
-      return [data[i], data[i + 1], data[i + 2]];
-    }
-
-    const corners = [
-      getPixel(0, 0),
-      getPixel(w - 1, 0),
-      getPixel(0, h - 1),
-      getPixel(w - 1, h - 1),
-    ];
-
-    const bg = corners
-      .reduce(
-        (acc, item) => [
-          acc[0] + item[0],
-          acc[1] + item[1],
-          acc[2] + item[2],
-        ],
-        [0, 0, 0]
-      )
-      .map((v) => Math.round(v / corners.length));
-
-    const tolerance = 55;
-
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-
-      const diff =
-        Math.abs(r - bg[0]) + Math.abs(g - bg[1]) + Math.abs(b - bg[2]);
-
-      const brightness = (r + g + b) / 3;
-
-      if (diff < tolerance || brightness > 238) {
-        data[i + 3] = 0;
-      }
-    }
-
-    ctx.putImageData(imageData, 0, 0);
-
-    return new Promise((resolve) => {
-      canvas.toBlob((newBlob) => resolve(newBlob), "image/png");
     });
   }
 
@@ -178,21 +107,12 @@ function SmartEditing({ selectedFile, image }) {
 
     const serverBlob = await response.blob();
 
-    let finalBlob = serverBlob;
+    const outputUrl = URL.createObjectURL(serverBlob);
 
-    try {
-      finalBlob = await removeLightBackgroundFallback(serverBlob);
-    } catch (error) {
-      console.log("Fallback remove background skipped:", error);
-      finalBlob = serverBlob;
-    }
-
-    const outputUrl = URL.createObjectURL(finalBlob);
-
-    setEditBlob(finalBlob);
+    setEditBlob(serverBlob);
     setEditImage(outputUrl);
 
-    return finalBlob;
+    return serverBlob;
   }
 
   async function handleRemoveBackground() {
@@ -211,32 +131,56 @@ function SmartEditing({ selectedFile, image }) {
     }
   }
 
-  function getPositionXY(canvasW, canvasH, imgW, imgH) {
+  function getPositionXY(canvasW, canvasH, imgW, imgH, selectedPosition) {
     let x = (canvasW - imgW) / 2;
     let y = (canvasH - imgH) / 2;
 
-    if (position === "top") y = 0;
-    if (position === "bottom") y = canvasH - imgH;
-    if (position === "left") x = 0;
-    if (position === "right") x = canvasW - imgW;
-    if (position === "top-left") {
+    if (selectedPosition === "top") y = 0;
+    if (selectedPosition === "bottom") y = canvasH - imgH;
+    if (selectedPosition === "left") x = 0;
+    if (selectedPosition === "right") x = canvasW - imgW;
+
+    if (selectedPosition === "top-left") {
       x = 0;
       y = 0;
     }
-    if (position === "top-right") {
+
+    if (selectedPosition === "top-right") {
       x = canvasW - imgW;
       y = 0;
     }
-    if (position === "bottom-left") {
+
+    if (selectedPosition === "bottom-left") {
       x = 0;
       y = canvasH - imgH;
     }
-    if (position === "bottom-right") {
+
+    if (selectedPosition === "bottom-right") {
       x = canvasW - imgW;
       y = canvasH - imgH;
     }
 
     return { x, y };
+  }
+
+  function drawImageWithFit(ctx, img, canvasW, canvasH, mode, selectedPosition) {
+    let drawW = img.width;
+    let drawH = img.height;
+
+    if (mode === "stretch") {
+      drawW = canvasW;
+      drawH = canvasH;
+    } else {
+      const fitScale = Math.min(canvasW / img.width, canvasH / img.height);
+      const fillScale = Math.max(canvasW / img.width, canvasH / img.height);
+      const scale = mode === "cover" || mode === "fill" ? fillScale : fitScale;
+
+      drawW = img.width * scale;
+      drawH = img.height * scale;
+    }
+
+    const { x, y } = getPositionXY(canvasW, canvasH, drawW, drawH, selectedPosition);
+    ctx.drawImage(img, x, y, drawW, drawH);
   }
 
   function drawGradient(ctx, width, height) {
@@ -252,6 +196,7 @@ function SmartEditing({ selectedFile, image }) {
 
     gradient.addColorStop(0, gradientOne);
     gradient.addColorStop(1, gradientTwo);
+
     ctx.fillStyle = gradient;
     ctx.fillRect(0, 0, width, height);
   }
@@ -263,6 +208,7 @@ function SmartEditing({ selectedFile, image }) {
 
     if (bgDesign === "dots") {
       ctx.fillStyle = "rgba(0,0,0,0.12)";
+
       for (let x = 20; x < width; x += 40) {
         for (let y = 20; y < height; y += 40) {
           ctx.beginPath();
@@ -309,8 +255,10 @@ function SmartEditing({ selectedFile, image }) {
         const y = Math.random() * height;
         const r = Math.min(width, height) * (0.08 + Math.random() * 0.12);
         const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+
         g.addColorStop(0, "rgba(255,255,255,0.35)");
         g.addColorStop(1, "rgba(255,255,255,0)");
+
         ctx.fillStyle = g;
         ctx.beginPath();
         ctx.arc(x, y, r, 0, Math.PI * 2);
@@ -354,7 +302,9 @@ function SmartEditing({ selectedFile, image }) {
       canvas.width = canvasWidth;
       canvas.height = canvasHeight;
 
-      const ctx = canvas.getContext("2d");
+      const ctx = canvas.getContext("2d", { alpha: true });
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
 
       if (bgMode === "color") {
         ctx.fillStyle = bgColor;
@@ -366,7 +316,7 @@ function SmartEditing({ selectedFile, image }) {
       }
 
       if (bgMode === "image" && background) {
-        ctx.drawImage(background, 0, 0, canvasWidth, canvasHeight);
+        drawImageWithFit(ctx, background, canvasWidth, canvasHeight, bgFitMode, bgPosition);
       }
 
       drawDesign(ctx, canvasWidth, canvasHeight);
@@ -395,14 +345,20 @@ function SmartEditing({ selectedFile, image }) {
         fgH = foreground.height * scale;
       }
 
-      const { x, y } = getPositionXY(canvasWidth, canvasHeight, fgW, fgH);
+      const { x, y } = getPositionXY(canvasWidth, canvasHeight, fgW, fgH, position);
       ctx.drawImage(foreground, x, y, fgW, fgH);
 
       canvas.toBlob((blob) => {
+        if (!blob) {
+          alert("Background apply failed");
+          setLoading(false);
+          return;
+        }
+
         setEditBlob(blob);
         setEditImage(URL.createObjectURL(blob));
         setLoading(false);
-      }, "image/png");
+      }, "image/png", 1);
     } catch (error) {
       alert("Background apply error: " + error.message);
       setLoading(false);
@@ -455,9 +411,11 @@ function SmartEditing({ selectedFile, image }) {
 
     const url = URL.createObjectURL(editBlob);
     const link = document.createElement("a");
+
     link.href = url;
     link.download = "smart-editing-output.png";
     link.click();
+
     URL.revokeObjectURL(url);
   }
 
@@ -559,7 +517,7 @@ function SmartEditing({ selectedFile, image }) {
 
         {bgMode === "image" && (
           <>
-            <label>Upload Background Image</label>
+            <label>Upload Your Own Background Image</label>
             <input type="file" accept="image/*" onChange={handleBackgroundUpload} />
 
             {bgPreview && (
@@ -568,6 +526,26 @@ function SmartEditing({ selectedFile, image }) {
                 <img src={bgPreview} alt="Background Preview" />
               </>
             )}
+
+            <label>Background Image Fit</label>
+            <select value={bgFitMode} onChange={(e) => setBgFitMode(e.target.value)}>
+              <option value="cover">Cover - fill full background</option>
+              <option value="fit">Fit - full background visible</option>
+              <option value="stretch">Stretch - force full canvas</option>
+            </select>
+
+            <label>Background Image Position</label>
+            <select value={bgPosition} onChange={(e) => setBgPosition(e.target.value)}>
+              <option value="center">Center</option>
+              <option value="top">Top</option>
+              <option value="bottom">Bottom</option>
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+              <option value="top-left">Top Left</option>
+              <option value="top-right">Top Right</option>
+              <option value="bottom-left">Bottom Left</option>
+              <option value="bottom-right">Bottom Right</option>
+            </select>
           </>
         )}
 
@@ -613,7 +591,7 @@ function SmartEditing({ selectedFile, image }) {
           onChange={(e) => setZoom(e.target.value)}
         />
 
-        <button className="upload-btn" onClick={applyBackgroundStudio}>
+        <button className="upload-btn" onClick={applyBackgroundStudio} disabled={loading}>
           Apply Background Studio
         </button>
 
