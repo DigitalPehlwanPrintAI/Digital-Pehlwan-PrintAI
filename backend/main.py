@@ -1035,10 +1035,71 @@ def _remove_white_halo(image):
     return image
 
 
+def _prepare_image_for_removebg_api(input_bytes, filename="image.png"):
+    """
+    remove.bg API upload limit ke liye image ko safe banata hai.
+    Important: Ye sirf API upload ke liye compression karta hai.
+    Background remove output transparent PNG hi rahega.
+    Baaki modules par iska koi effect nahi hoga.
+    """
+    max_upload_bytes = 20 * 1024 * 1024  # remove.bg 22MB limit se safe margin
+
+    # Agar file already small hai to original bytes hi bhejo
+    if len(input_bytes) <= max_upload_bytes:
+        return input_bytes, os.path.basename(filename or "image.png")
+
+    try:
+        image = Image.open(io.BytesIO(input_bytes))
+        image.load()
+    except Exception:
+        # Agar PIL open fail ho, original bytes bhejne do; API clear error de degi
+        return input_bytes, os.path.basename(filename or "image.png")
+
+    # Very large photos ko safe dimension me lao, taaki upload 22MB se neeche rahe
+    image = image.convert("RGB")
+    max_side = 2600
+    width, height = image.size
+
+    if max(width, height) > max_side:
+        scale = max_side / float(max(width, height))
+        new_width = max(1, int(width * scale))
+        new_height = max(1, int(height * scale))
+        image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+    # JPEG quality gradually reduce karo until safe size
+    for quality in [92, 88, 84, 80, 76, 72, 68, 64, 60]:
+        buffer = io.BytesIO()
+        image.save(
+            buffer,
+            format="JPEG",
+            quality=quality,
+            optimize=True,
+            progressive=True,
+        )
+        output = buffer.getvalue()
+        if len(output) <= max_upload_bytes:
+            return output, "printai-remove-bg-upload.jpg"
+
+    # Last fallback: dimension aur reduce karo
+    max_side = 1800
+    width, height = image.size
+    if max(width, height) > max_side:
+        scale = max_side / float(max(width, height))
+        image = image.resize(
+            (max(1, int(width * scale)), max(1, int(height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=72, optimize=True, progressive=True)
+    return buffer.getvalue(), "printai-remove-bg-upload.jpg"
+
+
 def _remove_bg_with_removebg_api(input_bytes, filename="image.png"):
     """
     remove.bg cloud API integration.
     Render free server par local AI model crash/timeout issue avoid karta hai.
+    Large image ko API limit ke andar compress karta hai.
     Output transparent PNG bytes return karta hai.
     """
     import urllib.request
@@ -1052,8 +1113,10 @@ def _remove_bg_with_removebg_api(input_bytes, filename="image.png"):
             detail="REMOVE_BG_API_KEY Render Environment me missing hai.",
         )
 
+    upload_bytes, upload_filename = _prepare_image_for_removebg_api(input_bytes, filename)
+
     boundary = "----PrintAIBoundary" + uuid.uuid4().hex
-    safe_filename = os.path.basename(filename or "image.png")
+    safe_filename = os.path.basename(upload_filename or "image.jpg")
 
     def part(name, value):
         return (
@@ -1070,10 +1133,9 @@ def _remove_bg_with_removebg_api(input_bytes, filename="image.png"):
             f"Content-Type: application/octet-stream\r\n\r\n"
         ).encode("utf-8")
     )
-    body.write(input_bytes)
+    body.write(upload_bytes)
     body.write(b"\r\n")
 
-    # auto = original suitable output, preserves quality as per API account limits
     body.write(part("size", "auto"))
     body.write(part("format", "png"))
     body.write(f"--{boundary}--\r\n".encode("utf-8"))
