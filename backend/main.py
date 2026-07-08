@@ -455,31 +455,37 @@ async def import_export_health():
 @app.get("/smart-edit/remove-bg-health")
 async def remove_bg_health():
     """
-    Is endpoint se check hoga ki rembg backend par properly installed hai ya nahi.
-    Browser me open karo:
-    /smart-edit/remove-bg-health
+    Lightweight health check.
+    Is route me rembg/onnxruntime import nahi kar rahe, kyunki Render free server
+    par heavy import health check ke time 502/timeout kara sakta hai.
+    Actual AI model sirf Remove Background click karne par load hoga.
     """
-    try:
-        import rembg
-        import onnxruntime
+    u2net_home = os.getenv("U2NET_HOME", "/tmp/.u2net")
+    requested_model = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
 
-        u2net_home = os.getenv("U2NET_HOME", "/tmp/.u2net")
-        rembg_model = os.getenv("REMBG_MODEL", "isnet-general-use")
+    heavy_models = ["isnet-general-use", "isnet-anime"]
+    allow_heavy = os.getenv("ALLOW_HEAVY_REMBG_MODEL", "false").lower() == "true"
 
-        return {
-            "status": "ok",
-            "rembg": "installed",
-            "onnxruntime": "installed",
-            "u2net_home": u2net_home,
-            "rembg_model": rembg_model,
-            "message": "Background remover dependencies are available.",
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": "Background remover dependency missing or failed.",
-            "error": str(e),
-        }
+    if requested_model in heavy_models and not allow_heavy:
+        effective_model = "u2netp"
+        model_note = (
+            f"Requested model '{requested_model}' is heavy for Render free 512MB. "
+            "Using stable model 'u2netp'."
+        )
+    else:
+        effective_model = requested_model
+        model_note = "Using requested/default model."
+
+    return {
+        "status": "ok",
+        "backend": "running",
+        "module": "Smart Editing Background Remover",
+        "u2net_home": u2net_home,
+        "requested_model": requested_model,
+        "effective_model": effective_model,
+        "message": "Backend route is working. AI model will load only when Remove Background is clicked.",
+        "note": model_note,
+    }
 
 
 # =========================================================
@@ -926,12 +932,13 @@ _REMBG_SESSION = None
 
 def _get_rembg_session():
     """
-    Background remover AI model ko ek baar load/cache karta hai.
+    Background remover AI model ko one-time load/cache karta hai.
 
-    Render/local deployment ke liye important:
-    - U2NET_HOME env variable use karo.
-    - Default model isnet-general-use hai.
-    - Agar isnet fail hota hai to u2net fallback try karega.
+    Render free instance 512MB par "isnet-general-use" heavy ho sakta hai.
+    Isliye default/stable model "u2netp" use kiya hai.
+    Agar aap paid/high-memory server par heavy model chalana chahte ho to:
+    ALLOW_HEAVY_REMBG_MODEL=true
+    REMBG_MODEL=isnet-general-use
     """
     global _REMBG_SESSION
 
@@ -942,14 +949,52 @@ def _get_rembg_session():
         os.makedirs(u2net_home, exist_ok=True)
         os.environ["U2NET_HOME"] = u2net_home
 
-        model_name = os.getenv("REMBG_MODEL", "isnet-general-use")
+        requested_model = os.getenv("REMBG_MODEL", "u2netp").strip() or "u2netp"
+        heavy_models = ["isnet-general-use", "isnet-anime"]
+        allow_heavy = os.getenv("ALLOW_HEAVY_REMBG_MODEL", "false").lower() == "true"
+
+        if requested_model in heavy_models and not allow_heavy:
+            model_name = "u2netp"
+        else:
+            model_name = requested_model
 
         try:
             _REMBG_SESSION = new_session(model_name)
         except Exception:
-            _REMBG_SESSION = new_session("u2net")
+            # Last safe fallback for beta hosting.
+            _REMBG_SESSION = new_session("u2netp")
 
     return _REMBG_SESSION
+
+
+def _prepare_ai_input(input_bytes, max_side=1600):
+    """
+    Large images par Render free instance memory crash se bachane ke liye
+    AI processing copy ko controlled size par bhejte hain.
+    Output ko baad me original pixel size par restore kar dete hain.
+    Baaki modules par iska koi effect nahi hai.
+    """
+    try:
+        image = Image.open(io.BytesIO(input_bytes)).convert("RGBA")
+        original_size = image.size
+        max_dim = max(image.size)
+
+        if max_dim <= max_side:
+            return input_bytes, original_size
+
+        scale = max_side / max_dim
+        new_size = (
+            max(1, int(image.width * scale)),
+            max(1, int(image.height * scale)),
+        )
+
+        resized = image.resize(new_size, Image.Resampling.LANCZOS)
+        buffer = io.BytesIO()
+        resized.save(buffer, format="PNG", optimize=True)
+        return buffer.getvalue(), original_size
+
+    except Exception:
+        return input_bytes, None
 
 
 def _cleanup_alpha_edges(image, feather=1):
@@ -1056,16 +1101,21 @@ async def remove_bg(
     - ai-pro / best / pro / ai = AI background remover
     - fast = simple corner-color remover
 
-    IMPORTANT:
-    Is version me AI fail hone par silent fallback nahi hoga.
-    Agar AI dependency/model issue hai to 500 error me clear reason milega.
-    Isse deploy issue easily pakad me aayega.
+    Important:
+    - Baaki modules ko touch nahi kiya gaya hai.
+    - Health check lightweight hai; AI model sirf yahan load hota hai.
+    - Large images ko AI processing ke liye temporarily downscale karke
+      output ko original size par restore karta hai, jisse Render free memory
+      crash kam hoga aur image dimensions disturb nahi honge.
     """
     try:
         input_bytes = await file.read()
         mode = (mode or "ai-pro").lower().strip()
         feather = max(0, min(int(feather), 3))
         tolerance = max(5, min(int(tolerance), 140))
+
+        if not input_bytes:
+            raise HTTPException(status_code=400, detail="No image received.")
 
         # AI PRO MODE
         if mode in ["ai", "ai-pro", "pro", "best"]:
@@ -1074,13 +1124,21 @@ async def remove_bg(
 
                 session = _get_rembg_session()
 
+                ai_input_bytes, original_size = _prepare_ai_input(
+                    input_bytes=input_bytes,
+                    max_side=1600,
+                )
+
                 output_bytes = remove(
-                    input_bytes,
+                    ai_input_bytes,
                     session=session,
                     force_return_bytes=True,
                 )
 
                 result = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
+
+                if original_size and result.size != original_size:
+                    result = result.resize(original_size, Image.Resampling.LANCZOS)
 
                 if feather > 0:
                     result = _cleanup_alpha_edges(result, feather=feather)
@@ -1103,10 +1161,14 @@ async def remove_bg(
             except Exception as ai_error:
                 raise HTTPException(
                     status_code=500,
-                    detail=f"AI background removal failed: {str(ai_error)}"
+                    detail=(
+                        "AI background removal failed. "
+                        "Render free memory/model issue ho sakta hai. "
+                        f"Error: {str(ai_error)}"
+                    ),
                 )
 
-        # FAST MODE
+        # FAST MODE: only plain white/light background ke liye.
         image = Image.open(io.BytesIO(input_bytes)).convert("RGBA")
         result = _simple_corner_background_remove(
             image,
