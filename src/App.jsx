@@ -7,8 +7,14 @@ import SmartEditing from "./SmartEditing.jsx";
 import SmartPrintStudio from "./components/SmartPrintStudio.jsx";
 import SmartBatchStudio from "./components/SmartBatchStudio.jsx";
 import TopMenu from "./components/TopMenu.jsx";
+import Auth from "./Auth.jsx";
 
 function App() {
+  const [currentUser, setCurrentUser] = useState(() => {
+    const savedUser = localStorage.getItem("printai_current_user");
+    return savedUser ? JSON.parse(savedUser) : null;
+  });
+
   const [tab, setTab] = useState("importexport");
   const [showSplash, setShowSplash] = useState(true);
 
@@ -434,8 +440,17 @@ function App() {
     };
   }
 
+  function handleLogout() {
+    localStorage.removeItem("printai_current_user");
+    setCurrentUser(null);
+  }
+
   if (showSplash) {
     return <SplashScreen onFinish={() => setShowSplash(false)} />;
+  }
+
+  if (!currentUser) {
+    return <Auth onLogin={setCurrentUser} />;
   }
 
   const required = calculateRequiredPixels();
@@ -444,6 +459,13 @@ function App() {
   return (
     <div className="app">
       <TopMenu />
+
+      <div className="user-bar">
+        <span>Welcome, {currentUser.name}</span>
+        <button onClick={handleLogout} className="logout-btn">
+          Logout
+        </button>
+      </div>
 
       <div className="tab-box">
         <button
