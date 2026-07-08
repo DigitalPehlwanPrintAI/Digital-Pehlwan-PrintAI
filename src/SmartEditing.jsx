@@ -6,7 +6,8 @@ import PickerStudio from "./components/PickerStudio.jsx";
 import OCRFontDetector from "./components/OCRFontDetector.jsx";
 import LogoStudio from "./components/LogoStudio.jsx";
 
-const API_BASE = "https://digital-pehlwan-printai.onrender.com";
+const API_BASE =
+  import.meta.env.VITE_API_BASE || "https://digital-pehlwan-printai.onrender.com";
 
 function SmartEditing({ selectedFile, image }) {
   const [editImage, setEditImage] = useState(null);
@@ -36,12 +37,16 @@ function SmartEditing({ selectedFile, image }) {
   const [edgeFeather, setEdgeFeather] = useState(0);
   const [removeStatus, setRemoveStatus] = useState("");
 
+  const [backendHealth, setBackendHealth] = useState("");
+  const [errorMessage, setErrorMessage] = useState("");
+
   useEffect(() => {
     if (image) {
       setEditImage(image);
       setEditBlob(null);
       setAnalysis(null);
       setRemoveStatus("");
+      setErrorMessage("");
     }
   }, [image]);
 
@@ -49,6 +54,57 @@ function SmartEditing({ selectedFile, image }) {
     if (selectedFile) return selectedFile;
     alert("Please upload image first");
     return null;
+  }
+
+  async function getResponseError(response) {
+    try {
+      const text = await response.text();
+
+      try {
+        const json = JSON.parse(text);
+
+        if (json.detail) {
+          if (typeof json.detail === "string") return json.detail;
+          return JSON.stringify(json.detail);
+        }
+
+        return JSON.stringify(json);
+      } catch {
+        return text || `HTTP Error ${response.status}`;
+      }
+    } catch {
+      return `HTTP Error ${response.status}`;
+    }
+  }
+
+  async function checkBackgroundRemoverHealth() {
+    setBackendHealth("Checking background remover...");
+    setErrorMessage("");
+
+    try {
+      const response = await fetch(`${API_BASE}/smart-edit/remove-bg-health`);
+
+      if (!response.ok) {
+        const err = await getResponseError(response);
+        setBackendHealth("Background remover health check failed");
+        setErrorMessage(err);
+        return;
+      }
+
+      const data = await response.json();
+
+      if (data.status === "ok") {
+        setBackendHealth(
+          `Background remover ready | Model: ${data.rembg_model || "ai-pro"}`
+        );
+      } else {
+        setBackendHealth("Background remover dependency issue");
+        setErrorMessage(data.error || data.message || "Unknown health error");
+      }
+    } catch (error) {
+      setBackendHealth("Backend health check error");
+      setErrorMessage(error.message);
+    }
   }
 
   function loadImageFromBlob(blob) {
@@ -61,7 +117,11 @@ function SmartEditing({ selectedFile, image }) {
         resolve(img);
       };
 
-      img.onerror = reject;
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("Image load failed from blob"));
+      };
+
       img.src = url;
     });
   }
@@ -76,7 +136,11 @@ function SmartEditing({ selectedFile, image }) {
         resolve(img);
       };
 
-      img.onerror = reject;
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("Image load failed from file"));
+      };
+
       img.src = url;
     });
   }
@@ -84,6 +148,9 @@ function SmartEditing({ selectedFile, image }) {
   async function removeBgAndGetBlob() {
     const file = getFile();
     if (!file) return null;
+
+    setRemoveStatus("");
+    setErrorMessage("");
 
     const formData = new FormData();
     formData.append("file", file);
@@ -97,15 +164,36 @@ function SmartEditing({ selectedFile, image }) {
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
+      const errorText = await getResponseError(response);
+      setRemoveStatus("Background remove failed");
+      setErrorMessage(errorText);
       alert("Remove Background Error: " + errorText);
       return null;
     }
 
+    const contentType = response.headers.get("content-type") || "";
+
+    if (!contentType.includes("image")) {
+      const errorText = await getResponseError(response);
+      setRemoveStatus("Invalid response from backend");
+      setErrorMessage(errorText);
+      alert("Invalid backend response: " + errorText);
+      return null;
+    }
+
     const backendMode = response.headers.get("X-PrintAI-BG-Mode") || removeMode;
-    setRemoveStatus(`Background remove mode: ${backendMode}`);
+    const backendStatus = response.headers.get("X-PrintAI-Status") || "success";
+
+    setRemoveStatus(`Background remove: ${backendMode} | ${backendStatus}`);
 
     const serverBlob = await response.blob();
+
+    if (!serverBlob || serverBlob.size === 0) {
+      setRemoveStatus("Background remove failed");
+      setErrorMessage("Empty image received from backend");
+      alert("Remove Background Error: Empty image received from backend");
+      return null;
+    }
 
     const outputUrl = URL.createObjectURL(serverBlob);
 
@@ -117,14 +205,17 @@ function SmartEditing({ selectedFile, image }) {
 
   async function handleRemoveBackground() {
     setLoading(true);
+    setErrorMessage("");
 
     try {
       const result = await removeBgAndGetBlob();
 
       if (!result) {
-        alert("Background remove failed. Please try another image.");
+        setErrorMessage((prev) => prev || "Background remove failed. Please try another image.");
       }
     } catch (error) {
+      setRemoveStatus("Background remove failed");
+      setErrorMessage(error.message);
       alert("Remove Background Error: " + error.message);
     } finally {
       setLoading(false);
@@ -179,7 +270,14 @@ function SmartEditing({ selectedFile, image }) {
       drawH = img.height * scale;
     }
 
-    const { x, y } = getPositionXY(canvasW, canvasH, drawW, drawH, selectedPosition);
+    const { x, y } = getPositionXY(
+      canvasW,
+      canvasH,
+      drawW,
+      drawH,
+      selectedPosition
+    );
+
     ctx.drawImage(img, x, y, drawW, drawH);
   }
 
@@ -271,6 +369,7 @@ function SmartEditing({ selectedFile, image }) {
 
   async function applyBackgroundStudio() {
     setLoading(true);
+    setErrorMessage("");
 
     try {
       const foregroundBlob = editBlob || (await removeBgAndGetBlob());
@@ -316,7 +415,14 @@ function SmartEditing({ selectedFile, image }) {
       }
 
       if (bgMode === "image" && background) {
-        drawImageWithFit(ctx, background, canvasWidth, canvasHeight, bgFitMode, bgPosition);
+        drawImageWithFit(
+          ctx,
+          background,
+          canvasWidth,
+          canvasHeight,
+          bgFitMode,
+          bgPosition
+        );
       }
 
       drawDesign(ctx, canvasWidth, canvasHeight);
@@ -348,19 +454,25 @@ function SmartEditing({ selectedFile, image }) {
       const { x, y } = getPositionXY(canvasWidth, canvasHeight, fgW, fgH, position);
       ctx.drawImage(foreground, x, y, fgW, fgH);
 
-      canvas.toBlob((blob) => {
-        if (!blob) {
-          alert("Background apply failed");
-          setLoading(false);
-          return;
-        }
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            alert("Background apply failed");
+            setErrorMessage("Background apply failed");
+            setLoading(false);
+            return;
+          }
 
-        setEditBlob(blob);
-        setEditImage(URL.createObjectURL(blob));
-        setLoading(false);
-      }, "image/png", 1);
+          setEditBlob(blob);
+          setEditImage(URL.createObjectURL(blob));
+          setLoading(false);
+        },
+        "image/png",
+        1
+      );
     } catch (error) {
       alert("Background apply error: " + error.message);
+      setErrorMessage(error.message);
       setLoading(false);
     }
   }
@@ -379,6 +491,7 @@ function SmartEditing({ selectedFile, image }) {
     if (!file) return;
 
     setLoading(true);
+    setErrorMessage("");
 
     try {
       const formData = new FormData();
@@ -390,13 +503,16 @@ function SmartEditing({ selectedFile, image }) {
       });
 
       if (!response.ok) {
-        alert("Analyze Error: " + (await response.text()));
+        const err = await getResponseError(response);
+        setErrorMessage(err);
+        alert("Analyze Error: " + err);
         return;
       }
 
       const data = await response.json();
       setAnalysis(data);
     } catch (error) {
+      setErrorMessage(error.message);
       alert("Analyze Error: " + error.message);
     } finally {
       setLoading(false);
@@ -434,8 +550,33 @@ function SmartEditing({ selectedFile, image }) {
 
         {loading && <p>Processing... please wait</p>}
         {removeStatus && <p>{removeStatus}</p>}
+        {backendHealth && <p>{backendHealth}</p>}
+
+        {errorMessage && (
+          <div
+            style={{
+              background: "#fff3f3",
+              color: "#b00020",
+              border: "1px solid #ffb4b4",
+              padding: "10px",
+              borderRadius: "8px",
+              marginTop: "10px",
+              whiteSpace: "pre-wrap",
+            }}
+          >
+            {errorMessage}
+          </div>
+        )}
 
         <h3>Background Remove Engine</h3>
+
+        <button
+          className="upload-btn"
+          onClick={checkBackgroundRemoverHealth}
+          disabled={loading}
+        >
+          Check Background Remover Health
+        </button>
 
         <label>Remove Mode</label>
         <select value={removeMode} onChange={(e) => setRemoveMode(e.target.value)}>

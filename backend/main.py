@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from PIL import Image, ImageFilter, ImageEnhance, ImageStat, ImageOps
+from PIL import Image, ImageFilter, ImageEnhance, ImageStat
 from io import BytesIO
 import io
 import os
@@ -55,13 +55,6 @@ def _hex_to_rgb(hex_color: str):
         return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
     except Exception:
         return (255, 255, 255)
-
-
-def _safe_int(value, default=0):
-    try:
-        return int(value)
-    except Exception:
-        return default
 
 
 def _safe_quality(value):
@@ -319,11 +312,6 @@ def _make_eps_from_image(image, dpi=300):
 
 
 def _make_flattened_psd(image):
-    """
-    Basic flattened PSD export.
-    यह layered PSD नहीं है, लेकिन Photoshop में open होने वाली .psd file देता है.
-    Layered PSD बाद में अलग engine से आएगा.
-    """
     image = image.convert("RGBA")
     width, height = image.size
 
@@ -354,11 +342,6 @@ def _make_flattened_psd(image):
 
 
 def _make_corel_compatible_zip(image, base_name, dpi=300, quality=98):
-    """
-    CDR direct export possible नहीं है.
-    यह ZIP देता है जिसमें CorelDRAW-compatible files होंगी:
-    SVG + PDF + EPS + TIFF + PNG
-    """
     image_rgba = image.convert("RGBA")
     image_rgb = image.convert("RGB")
 
@@ -390,7 +373,7 @@ def _make_corel_compatible_zip(image, base_name, dpi=300, quality=98):
 
         readme = f"""PrintAI by Digital Pehlwan
 
-CDR direct export browser/Python se reliable possible nahi hota kyunki CorelDRAW .cdr proprietary format hai.
+CDR direct export possible nahi hai kyunki CorelDRAW .cdr proprietary format hai.
 
 Is ZIP ke andar CorelDRAW-compatible files hain:
 1. {base_name}.svg
@@ -467,6 +450,36 @@ async def import_export_health():
             "svg", "eps", "psd", "corel-compatible-zip"
         ],
     }
+
+
+@app.get("/smart-edit/remove-bg-health")
+async def remove_bg_health():
+    """
+    Is endpoint se check hoga ki rembg backend par properly installed hai ya nahi.
+    Browser me open karo:
+    /smart-edit/remove-bg-health
+    """
+    try:
+        import rembg
+        import onnxruntime
+
+        u2net_home = os.getenv("U2NET_HOME", "/tmp/.u2net")
+        rembg_model = os.getenv("REMBG_MODEL", "isnet-general-use")
+
+        return {
+            "status": "ok",
+            "rembg": "installed",
+            "onnxruntime": "installed",
+            "u2net_home": u2net_home,
+            "rembg_model": rembg_model,
+            "message": "Background remover dependencies are available.",
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": "Background remover dependency missing or failed.",
+            "error": str(e),
+        }
 
 
 # =========================================================
@@ -721,7 +734,6 @@ async def import_export_image(
 
         base_name = _base_name(file.filename)
 
-        # PNG
         if export_format == "png":
             buffer = io.BytesIO()
             output_image = canvas.convert("RGBA") if background_mode == "transparent" else canvas.convert("RGB")
@@ -733,7 +745,6 @@ async def import_export_image(
                 headers={"Content-Disposition": f'attachment; filename="{base_name}_{safe_dpi}dpi.png"'},
             )
 
-        # JPG
         if export_format in ["jpg", "jpeg"]:
             buffer = io.BytesIO()
             output_image = canvas.convert("CMYK") if color_mode.lower() == "cmyk" else canvas.convert("RGB")
@@ -751,7 +762,6 @@ async def import_export_image(
                 headers={"Content-Disposition": f'attachment; filename="{base_name}_{safe_dpi}dpi.jpg"'},
             )
 
-        # WEBP
         if export_format == "webp":
             buffer = io.BytesIO()
             output_image = canvas.convert("RGBA")
@@ -763,7 +773,6 @@ async def import_export_image(
                 headers={"Content-Disposition": f'attachment; filename="{base_name}_{safe_dpi}dpi.webp"'},
             )
 
-        # PDF
         if export_format == "pdf":
             buffer = io.BytesIO()
             output_image = canvas.convert("CMYK") if color_mode.lower() == "cmyk" else canvas.convert("RGB")
@@ -775,7 +784,6 @@ async def import_export_image(
                 headers={"Content-Disposition": f'attachment; filename="{base_name}_print_ready_{safe_dpi}dpi.pdf"'},
             )
 
-        # TIFF
         if export_format in ["tiff", "tif"]:
             buffer = io.BytesIO()
             output_image = canvas.convert("CMYK") if color_mode.lower() == "cmyk" else canvas.convert("RGB")
@@ -792,7 +800,6 @@ async def import_export_image(
                 headers={"Content-Disposition": f'attachment; filename="{base_name}_{safe_dpi}dpi.tiff"'},
             )
 
-        # BMP
         if export_format == "bmp":
             buffer = io.BytesIO()
             canvas.convert("RGB").save(buffer, format="BMP")
@@ -803,7 +810,6 @@ async def import_export_image(
                 headers={"Content-Disposition": f'attachment; filename="{base_name}.bmp"'},
             )
 
-        # SVG
         if export_format == "svg":
             svg_bytes = _make_svg_from_image(canvas.convert("RGBA"), dpi=safe_dpi)
             return Response(
@@ -812,7 +818,6 @@ async def import_export_image(
                 headers={"Content-Disposition": f'attachment; filename="{base_name}_corel_compatible.svg"'},
             )
 
-        # EPS
         if export_format == "eps":
             eps_bytes = _make_eps_from_image(canvas.convert("RGB"), dpi=safe_dpi)
             return Response(
@@ -821,7 +826,6 @@ async def import_export_image(
                 headers={"Content-Disposition": f'attachment; filename="{base_name}_corel_compatible.eps"'},
             )
 
-        # PSD flattened
         if export_format == "psd":
             psd_bytes = _make_flattened_psd(canvas.convert("RGBA"))
             return Response(
@@ -830,7 +834,6 @@ async def import_export_image(
                 headers={"Content-Disposition": f'attachment; filename="{base_name}_flattened.psd"'},
             )
 
-        # CDR/Corel compatible ZIP
         if export_format in ["corel", "cdr"]:
             zip_bytes = _make_corel_compatible_zip(
                 image=canvas.convert("RGBA"),
@@ -923,28 +926,33 @@ _REMBG_SESSION = None
 
 def _get_rembg_session():
     """
-    rembg model ko ek baar load/cache karta hai.
+    Background remover AI model ko ek baar load/cache karta hai.
 
-    IMPORTANT:
-    Pehle model "u2net" tha. U2Net basic output deta hai.
-    PrintAI ke liye better cutout ke liye "isnet-general-use" use kar rahe hain.
-    First request par model download/load slow ho sakta hai, uske baad cache ho jayega.
+    Render/local deployment ke liye important:
+    - U2NET_HOME env variable use karo.
+    - Default model isnet-general-use hai.
+    - Agar isnet fail hota hai to u2net fallback try karega.
     """
     global _REMBG_SESSION
+
     if _REMBG_SESSION is None:
         from rembg import new_session
+
+        u2net_home = os.getenv("U2NET_HOME", "/tmp/.u2net")
+        os.makedirs(u2net_home, exist_ok=True)
+        os.environ["U2NET_HOME"] = u2net_home
+
+        model_name = os.getenv("REMBG_MODEL", "isnet-general-use")
+
         try:
-            _REMBG_SESSION = new_session("isnet-general-use")
+            _REMBG_SESSION = new_session(model_name)
         except Exception:
-            # Fallback agar Render/local par isnet model load na ho
             _REMBG_SESSION = new_session("u2net")
+
     return _REMBG_SESSION
 
 
 def _cleanup_alpha_edges(image, feather=1):
-    """
-    Cutout edges ko halka smooth karta hai.
-    """
     image = image.convert("RGBA")
 
     if feather and feather > 0:
@@ -957,8 +965,9 @@ def _cleanup_alpha_edges(image, feather=1):
 
 def _simple_corner_background_remove(image, tolerance=55, feather=1):
     """
-    Fast CPU-safe background removal for beta hosting.
-    Plain/white/light background par best kaam karta hai.
+    Fast CPU-safe background removal.
+    Plain/white/light background par kaam karega.
+    Complex images ke liye AI Pro mode use karo.
     """
     image = image.convert("RGBA")
     width, height = image.size
@@ -1010,9 +1019,8 @@ def _simple_corner_background_remove(image, tolerance=55, feather=1):
 
 def _remove_white_halo(image):
     """
-    White background se nikle object ke edges par white halo kam karta hai.
-    Pehle wala formula semi-transparent pixels ko dark kar raha tha.
-    Yeh version conservative hai: sirf white-ish semi-transparent edge pixels ko clean karta hai.
+    White background se nikle object ke edge par white halo kam karta hai.
+    Conservative cleanup hai, object ko damage nahi karega.
     """
     image = image.convert("RGBA")
     data = image.load()
@@ -1023,7 +1031,6 @@ def _remove_white_halo(image):
             r, g, b, a = data[x, y]
 
             if 8 < a < 245:
-                # Sirf bahut light/white fringe pixels ko decontaminate karo
                 if r > 190 and g > 190 and b > 190:
                     alpha = a / 255.0
                     if alpha > 0:
@@ -1046,12 +1053,13 @@ async def remove_bg(
     Smart Editing Background Remove Pro
 
     mode:
-    - ai-pro / best: ISNet/U2Net AI model with print-safe PNG output
-    - fast: corner-color remover for plain background
+    - ai-pro / best / pro / ai = AI background remover
+    - fast = simple corner-color remover
 
-    Note:
-    Alpha matting ko default OFF rakha hai, kyunki har image par matting edges ko
-    over-cut/dirty kar sakta hai. ISNet model direct better cutout deta hai.
+    IMPORTANT:
+    Is version me AI fail hone par silent fallback nahi hoga.
+    Agar AI dependency/model issue hai to 500 error me clear reason milega.
+    Isse deploy issue easily pakad me aayega.
     """
     try:
         input_bytes = await file.read()
@@ -1059,14 +1067,13 @@ async def remove_bg(
         feather = max(0, min(int(feather), 3))
         tolerance = max(5, min(int(tolerance), 140))
 
-        # AI Pro Mode
+        # AI PRO MODE
         if mode in ["ai", "ai-pro", "pro", "best"]:
             try:
                 from rembg import remove
 
                 session = _get_rembg_session()
 
-                # Best general output: model mask without aggressive alpha matting
                 output_bytes = remove(
                     input_bytes,
                     session=session,
@@ -1075,11 +1082,9 @@ async def remove_bg(
 
                 result = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
 
-                # Edge cleanup: feather default 0 to avoid blur/dirty edges
                 if feather > 0:
                     result = _cleanup_alpha_edges(result, feather=feather)
 
-                # Conservative white halo cleanup
                 result = _remove_white_halo(result)
 
                 buffer = io.BytesIO()
@@ -1089,32 +1094,19 @@ async def remove_bg(
                 return Response(
                     content=buffer.getvalue(),
                     media_type="image/png",
-                    headers={"X-PrintAI-BG-Mode": "ai-pro-isnet"},
-                )
-
-            except Exception as ai_error:
-                # AI fail hone par request fail nahi hogi; fast fallback chalega
-                image = Image.open(io.BytesIO(input_bytes)).convert("RGBA")
-                result = _simple_corner_background_remove(
-                    image,
-                    tolerance=tolerance,
-                    feather=feather,
-                )
-
-                buffer = io.BytesIO()
-                result.save(buffer, format="PNG", optimize=True)
-                buffer.seek(0)
-
-                return Response(
-                    content=buffer.getvalue(),
-                    media_type="image/png",
                     headers={
-                        "X-PrintAI-BG-Mode": "fast-fallback",
-                        "X-PrintAI-AI-Error": str(ai_error)[:160],
+                        "X-PrintAI-BG-Mode": "ai-pro",
+                        "X-PrintAI-Status": "success",
                     },
                 )
 
-        # Fast Mode
+            except Exception as ai_error:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"AI background removal failed: {str(ai_error)}"
+                )
+
+        # FAST MODE
         image = Image.open(io.BytesIO(input_bytes)).convert("RGBA")
         result = _simple_corner_background_remove(
             image,
@@ -1129,11 +1121,19 @@ async def remove_bg(
         return Response(
             content=buffer.getvalue(),
             media_type="image/png",
-            headers={"X-PrintAI-BG-Mode": "fast"},
+            headers={
+                "X-PrintAI-BG-Mode": "fast",
+                "X-PrintAI-Status": "success",
+            },
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Remove background failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Remove background failed: {str(e)}"
+        )
 
 
 @app.post("/smart-edit/replace-bg")
