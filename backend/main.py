@@ -917,11 +917,48 @@ async def smart_repair(
     return Response(content=output.getvalue(), media_type="image/jpeg")
 
 
+# AI session cache for rembg
+_REMBG_SESSION = None
+
+
+def _get_rembg_session():
+    """
+    rembg model ko ek baar load/cache karta hai.
+
+    IMPORTANT:
+    Pehle model "u2net" tha. U2Net basic output deta hai.
+    PrintAI ke liye better cutout ke liye "isnet-general-use" use kar rahe hain.
+    First request par model download/load slow ho sakta hai, uske baad cache ho jayega.
+    """
+    global _REMBG_SESSION
+    if _REMBG_SESSION is None:
+        from rembg import new_session
+        try:
+            _REMBG_SESSION = new_session("isnet-general-use")
+        except Exception:
+            # Fallback agar Render/local par isnet model load na ho
+            _REMBG_SESSION = new_session("u2net")
+    return _REMBG_SESSION
+
+
+def _cleanup_alpha_edges(image, feather=1):
+    """
+    Cutout edges ko halka smooth karta hai.
+    """
+    image = image.convert("RGBA")
+
+    if feather and feather > 0:
+        alpha = image.getchannel("A")
+        alpha = alpha.filter(ImageFilter.GaussianBlur(radius=max(0, min(int(feather), 4))))
+        image.putalpha(alpha)
+
+    return image
+
+
 def _simple_corner_background_remove(image, tolerance=55, feather=1):
     """
     Fast CPU-safe background removal for beta hosting.
-    It removes background similar to corner colors. Works best on white/plain backgrounds.
-    This avoids rembg model download hanging on Render Free.
+    Plain/white/light background par best kaam karta hai.
     """
     image = image.convert("RGBA")
     width, height = image.size
@@ -950,42 +987,150 @@ def _simple_corner_background_remove(image, tolerance=55, feather=1):
     result = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     result_pixels = result.load()
 
+    tolerance = max(5, min(int(tolerance), 140))
+    soft_range = 38
+
     for y in range(height):
         for x in range(width):
             r, g, b, a = pixels[x, y]
             dist = math.sqrt((r - bg_r) ** 2 + (g - bg_g) ** 2 + (b - bg_b) ** 2)
+            brightness = (r + g + b) / 3
 
-            if dist <= tolerance:
+            if dist <= tolerance or brightness >= 248:
                 new_a = 0
-            elif dist <= tolerance + 35:
-                new_a = int(255 * ((dist - tolerance) / 35))
+            elif dist <= tolerance + soft_range:
+                new_a = int(255 * ((dist - tolerance) / soft_range))
             else:
                 new_a = a
 
             result_pixels[x, y] = (r, g, b, new_a)
 
-    if feather > 0:
-        alpha = result.getchannel("A").filter(ImageFilter.GaussianBlur(radius=feather))
-        result.putalpha(alpha)
+    return _cleanup_alpha_edges(result, feather=feather)
 
-    return result
+
+def _remove_white_halo(image):
+    """
+    White background se nikle object ke edges par white halo kam karta hai.
+    Pehle wala formula semi-transparent pixels ko dark kar raha tha.
+    Yeh version conservative hai: sirf white-ish semi-transparent edge pixels ko clean karta hai.
+    """
+    image = image.convert("RGBA")
+    data = image.load()
+    width, height = image.size
+
+    for y in range(height):
+        for x in range(width):
+            r, g, b, a = data[x, y]
+
+            if 8 < a < 245:
+                # Sirf bahut light/white fringe pixels ko decontaminate karo
+                if r > 190 and g > 190 and b > 190:
+                    alpha = a / 255.0
+                    if alpha > 0:
+                        r = int(max(0, min(255, (r - 255 * (1 - alpha)) / alpha)))
+                        g = int(max(0, min(255, (g - 255 * (1 - alpha)) / alpha)))
+                        b = int(max(0, min(255, (b - 255 * (1 - alpha)) / alpha)))
+                        data[x, y] = (r, g, b, a)
+
+    return image
 
 
 @app.post("/smart-edit/remove-bg")
-async def remove_bg(file: UploadFile = File(...)):
+async def remove_bg(
+    file: UploadFile = File(...),
+    mode: str = Form("ai-pro"),
+    tolerance: int = Form(55),
+    feather: int = Form(0),
+):
+    """
+    Smart Editing Background Remove Pro
+
+    mode:
+    - ai-pro / best: ISNet/U2Net AI model with print-safe PNG output
+    - fast: corner-color remover for plain background
+
+    Note:
+    Alpha matting ko default OFF rakha hai, kyunki har image par matting edges ko
+    over-cut/dirty kar sakta hai. ISNet model direct better cutout deta hai.
+    """
     try:
         input_bytes = await file.read()
-        image = Image.open(io.BytesIO(input_bytes)).convert("RGBA")
+        mode = (mode or "ai-pro").lower().strip()
+        feather = max(0, min(int(feather), 3))
+        tolerance = max(5, min(int(tolerance), 140))
 
-        # Render Free par rembg model download/load hang ho sakta hai.
-        # Isliye beta version me fast CPU-safe background remover use kar rahe hain.
-        result = _simple_corner_background_remove(image, tolerance=55, feather=1)
+        # AI Pro Mode
+        if mode in ["ai", "ai-pro", "pro", "best"]:
+            try:
+                from rembg import remove
+
+                session = _get_rembg_session()
+
+                # Best general output: model mask without aggressive alpha matting
+                output_bytes = remove(
+                    input_bytes,
+                    session=session,
+                    force_return_bytes=True,
+                )
+
+                result = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
+
+                # Edge cleanup: feather default 0 to avoid blur/dirty edges
+                if feather > 0:
+                    result = _cleanup_alpha_edges(result, feather=feather)
+
+                # Conservative white halo cleanup
+                result = _remove_white_halo(result)
+
+                buffer = io.BytesIO()
+                result.save(buffer, format="PNG", optimize=True)
+                buffer.seek(0)
+
+                return Response(
+                    content=buffer.getvalue(),
+                    media_type="image/png",
+                    headers={"X-PrintAI-BG-Mode": "ai-pro-isnet"},
+                )
+
+            except Exception as ai_error:
+                # AI fail hone par request fail nahi hogi; fast fallback chalega
+                image = Image.open(io.BytesIO(input_bytes)).convert("RGBA")
+                result = _simple_corner_background_remove(
+                    image,
+                    tolerance=tolerance,
+                    feather=feather,
+                )
+
+                buffer = io.BytesIO()
+                result.save(buffer, format="PNG", optimize=True)
+                buffer.seek(0)
+
+                return Response(
+                    content=buffer.getvalue(),
+                    media_type="image/png",
+                    headers={
+                        "X-PrintAI-BG-Mode": "fast-fallback",
+                        "X-PrintAI-AI-Error": str(ai_error)[:160],
+                    },
+                )
+
+        # Fast Mode
+        image = Image.open(io.BytesIO(input_bytes)).convert("RGBA")
+        result = _simple_corner_background_remove(
+            image,
+            tolerance=tolerance,
+            feather=feather,
+        )
 
         buffer = io.BytesIO()
-        result.save(buffer, format="PNG")
+        result.save(buffer, format="PNG", optimize=True)
         buffer.seek(0)
 
-        return Response(content=buffer.getvalue(), media_type="image/png")
+        return Response(
+            content=buffer.getvalue(),
+            media_type="image/png",
+            headers={"X-PrintAI-BG-Mode": "fast"},
+        )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Remove background failed: {str(e)}")

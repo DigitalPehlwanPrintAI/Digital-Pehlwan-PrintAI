@@ -6,7 +6,7 @@ import PickerStudio from "./components/PickerStudio.jsx";
 import OCRFontDetector from "./components/OCRFontDetector.jsx";
 import LogoStudio from "./components/LogoStudio.jsx";
 
-const API_BASE = "https://digital-pehlwan-printai.onrender.com";
+const API_BASE = "http://127.0.0.1:8000";
 
 function SmartEditing({ selectedFile, image }) {
   const [editImage, setEditImage] = useState(null);
@@ -28,8 +28,16 @@ function SmartEditing({ selectedFile, image }) {
   const [position, setPosition] = useState("center");
   const [zoom, setZoom] = useState(100);
 
+  const [removeMode, setRemoveMode] = useState("ai-pro");
+  const [removeTolerance, setRemoveTolerance] = useState(55);
+  const [edgeFeather, setEdgeFeather] = useState(1);
+  const [removeStatus, setRemoveStatus] = useState("");
+
   useEffect(() => {
-    if (image) setEditImage(image);
+    if (image) {
+      setEditImage(image);
+      setEditBlob(null);
+    }
   }, [image]);
 
   function getFile() {
@@ -56,14 +64,103 @@ function SmartEditing({ selectedFile, image }) {
     });
   }
 
-  async function removeBgAndGetBlob() {
-    if (editBlob) return editBlob;
+  function blobToImage(blob) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(blob);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        resolve(img);
+      };
+      img.onerror = reject;
+      img.src = url;
+    });
+  }
 
+  function imageDataHasTransparency(imageData) {
+    const data = imageData.data;
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 250) return true;
+    }
+    return false;
+  }
+
+  async function removeLightBackgroundFallback(blob) {
+    const img = await blobToImage(blob);
+
+    const canvas = document.createElement("canvas");
+    canvas.width = img.width;
+    canvas.height = img.height;
+
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    if (imageDataHasTransparency(imageData)) {
+      return blob;
+    }
+
+    const data = imageData.data;
+    const w = canvas.width;
+    const h = canvas.height;
+
+    function getPixel(x, y) {
+      const i = (y * w + x) * 4;
+      return [data[i], data[i + 1], data[i + 2]];
+    }
+
+    const corners = [
+      getPixel(0, 0),
+      getPixel(w - 1, 0),
+      getPixel(0, h - 1),
+      getPixel(w - 1, h - 1),
+    ];
+
+    const bg = corners
+      .reduce(
+        (acc, item) => [
+          acc[0] + item[0],
+          acc[1] + item[1],
+          acc[2] + item[2],
+        ],
+        [0, 0, 0]
+      )
+      .map((v) => Math.round(v / corners.length));
+
+    const tolerance = 55;
+
+    for (let i = 0; i < data.length; i += 4) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+
+      const diff =
+        Math.abs(r - bg[0]) + Math.abs(g - bg[1]) + Math.abs(b - bg[2]);
+
+      const brightness = (r + g + b) / 3;
+
+      if (diff < tolerance || brightness > 238) {
+        data[i + 3] = 0;
+      }
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+
+    return new Promise((resolve) => {
+      canvas.toBlob((newBlob) => resolve(newBlob), "image/png");
+    });
+  }
+
+  async function removeBgAndGetBlob() {
     const file = getFile();
     if (!file) return null;
 
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("mode", removeMode);
+    formData.append("tolerance", String(removeTolerance));
+    formData.append("feather", String(edgeFeather));
 
     const response = await fetch(`${API_BASE}/smart-edit/remove-bg`, {
       method: "POST",
@@ -71,20 +168,44 @@ function SmartEditing({ selectedFile, image }) {
     });
 
     if (!response.ok) {
-      alert("Remove Background Error: " + (await response.text()));
+      const errorText = await response.text();
+      alert("Remove Background Error: " + errorText);
       return null;
     }
 
-    const blob = await response.blob();
-    setEditBlob(blob);
-    setEditImage(URL.createObjectURL(blob));
-    return blob;
+    const backendMode = response.headers.get("X-PrintAI-BG-Mode") || removeMode;
+    setRemoveStatus(`Background remove mode: ${backendMode}`);
+
+    const serverBlob = await response.blob();
+
+    let finalBlob = serverBlob;
+
+    try {
+      finalBlob = await removeLightBackgroundFallback(serverBlob);
+    } catch (error) {
+      console.log("Fallback remove background skipped:", error);
+      finalBlob = serverBlob;
+    }
+
+    const outputUrl = URL.createObjectURL(finalBlob);
+
+    setEditBlob(finalBlob);
+    setEditImage(outputUrl);
+
+    return finalBlob;
   }
 
   async function handleRemoveBackground() {
     setLoading(true);
+
     try {
-      await removeBgAndGetBlob();
+      const result = await removeBgAndGetBlob();
+
+      if (!result) {
+        alert("Background remove failed. Please try another image.");
+      }
+    } catch (error) {
+      alert("Remove Background Error: " + error.message);
     } finally {
       setLoading(false);
     }
@@ -98,10 +219,22 @@ function SmartEditing({ selectedFile, image }) {
     if (position === "bottom") y = canvasH - imgH;
     if (position === "left") x = 0;
     if (position === "right") x = canvasW - imgW;
-    if (position === "top-left") { x = 0; y = 0; }
-    if (position === "top-right") { x = canvasW - imgW; y = 0; }
-    if (position === "bottom-left") { x = 0; y = canvasH - imgH; }
-    if (position === "bottom-right") { x = canvasW - imgW; y = canvasH - imgH; }
+    if (position === "top-left") {
+      x = 0;
+      y = 0;
+    }
+    if (position === "top-right") {
+      x = canvasW - imgW;
+      y = 0;
+    }
+    if (position === "bottom-left") {
+      x = 0;
+      y = canvasH - imgH;
+    }
+    if (position === "bottom-right") {
+      x = canvasW - imgW;
+      y = canvasH - imgH;
+    }
 
     return { x, y };
   }
@@ -142,12 +275,14 @@ function SmartEditing({ selectedFile, image }) {
     if (bgDesign === "grid") {
       ctx.strokeStyle = "rgba(0,0,0,0.12)";
       ctx.lineWidth = 1;
+
       for (let x = 0; x < width; x += 40) {
         ctx.beginPath();
         ctx.moveTo(x, 0);
         ctx.lineTo(x, height);
         ctx.stroke();
       }
+
       for (let y = 0; y < height; y += 40) {
         ctx.beginPath();
         ctx.moveTo(0, y);
@@ -159,6 +294,7 @@ function SmartEditing({ selectedFile, image }) {
     if (bgDesign === "diagonal") {
       ctx.strokeStyle = "rgba(0,0,0,0.14)";
       ctx.lineWidth = 3;
+
       for (let i = -height; i < width; i += 45) {
         ctx.beginPath();
         ctx.moveTo(i, height);
@@ -189,7 +325,8 @@ function SmartEditing({ selectedFile, image }) {
     setLoading(true);
 
     try {
-      const foregroundBlob = await removeBgAndGetBlob();
+      const foregroundBlob = editBlob || (await removeBgAndGetBlob());
+
       if (!foregroundBlob) {
         setLoading(false);
         return;
@@ -331,15 +468,43 @@ function SmartEditing({ selectedFile, image }) {
 
         <p>
           Remove Background • Background Studio • Picker Studio • Logo Studio •
-          OCR + Font Detection • Selective Blur • Magic Eraser • Object/Text Remover
+          OCR + Font Detection • Selective Blur • Magic Eraser • Object/Text
+          Remover
         </p>
 
         {editImage && <img src={editImage} alt="Smart Editing Preview" />}
 
         {loading && <p>Processing... please wait</p>}
+        {removeStatus && <p>{removeStatus}</p>}
 
-        <button className="upload-btn" onClick={handleRemoveBackground}>
-          Remove Background
+        <h3>Background Remove Engine</h3>
+
+        <label>Remove Mode</label>
+        <select value={removeMode} onChange={(e) => setRemoveMode(e.target.value)}>
+          <option value="ai-pro">AI Pro Remove - best quality</option>
+          <option value="fast">Fast Remove - plain white/light background</option>
+        </select>
+
+        <label>Background Tolerance: {removeTolerance}</label>
+        <input
+          type="range"
+          min="5"
+          max="140"
+          value={removeTolerance}
+          onChange={(e) => setRemoveTolerance(Number(e.target.value))}
+        />
+
+        <label>Edge Smooth / Feather: {edgeFeather}</label>
+        <input
+          type="range"
+          min="0"
+          max="4"
+          value={edgeFeather}
+          onChange={(e) => setEdgeFeather(Number(e.target.value))}
+        />
+
+        <button className="upload-btn" onClick={handleRemoveBackground} disabled={loading}>
+          {loading ? "Removing Background..." : "Remove Background"}
         </button>
 
         <hr />
