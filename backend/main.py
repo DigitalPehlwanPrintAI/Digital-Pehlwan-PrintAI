@@ -455,31 +455,24 @@ async def import_export_health():
 @app.get("/smart-edit/remove-bg-health")
 async def remove_bg_health():
     """
-    Is endpoint se check hoga ki rembg backend par properly installed hai ya nahi.
-    Browser me open karo:
-    /smart-edit/remove-bg-health
+    Lightweight health check for Smart Editing Background Remover.
+    Is route me heavy AI model import nahi hota, isliye Render free server crash nahi karega.
+    Actual background removal remove.bg API se hoga.
     """
-    try:
-        import rembg
-        import onnxruntime
+    api_key_present = bool(os.getenv("REMOVE_BG_API_KEY"))
 
-        u2net_home = os.getenv("U2NET_HOME", "/tmp/.u2net")
-        rembg_model = os.getenv("REMBG_MODEL", "isnet-general-use")
-
-        return {
-            "status": "ok",
-            "rembg": "installed",
-            "onnxruntime": "installed",
-            "u2net_home": u2net_home,
-            "rembg_model": rembg_model,
-            "message": "Background remover dependencies are available.",
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": "Background remover dependency missing or failed.",
-            "error": str(e),
-        }
+    return {
+        "status": "ok",
+        "backend": "running",
+        "module": "Smart Editing Background Remover",
+        "engine": "remove.bg API",
+        "remove_bg_api_key": "present" if api_key_present else "missing",
+        "message": (
+            "Backend route is working and remove.bg API key is configured."
+            if api_key_present
+            else "Backend route is working but REMOVE_BG_API_KEY is missing in Render Environment."
+        ),
+    }
 
 
 # =========================================================
@@ -1042,74 +1035,76 @@ def _remove_white_halo(image):
     return image
 
 
-def _make_print_safe_alpha_cutout(original_image, cutout_small, original_size):
+def _remove_bg_with_removebg_api(input_bytes, filename="image.png"):
     """
-    AI small image par chalega, lekin final RGB original image se rahega.
-    Isse original image blur/disturb nahi hoti; sirf alpha mask apply hota hai.
+    remove.bg cloud API integration.
+    Render free server par local AI model crash/timeout issue avoid karta hai.
+    Output transparent PNG bytes return karta hai.
     """
-    original_rgba = original_image.convert("RGBA")
-    cutout_rgba = cutout_small.convert("RGBA")
+    import urllib.request
+    import urllib.error
+    import uuid
 
-    alpha = cutout_rgba.getchannel("A")
-    alpha = alpha.resize(original_size, Image.Resampling.LANCZOS)
-
-    # Mask ko thoda clean karo, but object edge ko over-blur nahi karna.
-    alpha = alpha.filter(ImageFilter.MedianFilter(size=3))
-
-    final_image = original_rgba.copy()
-    final_image.putalpha(alpha)
-    return final_image
-
-
-def _ai_remove_bg_render_safe(input_bytes, feather=0):
-    """
-    Render free server ke liye safe AI remove:
-    - Large image ko internally max 1024px par process karta hai.
-    - Final output original image size/color se banata hai.
-    - Isse memory crash kam hota hai aur image blur nahi hoti.
-    """
-    from rembg import remove
-
-    original = Image.open(io.BytesIO(input_bytes)).convert("RGBA")
-    original_size = original.size
-
-    max_side = 1024
-    work_image = original.copy()
-
-    largest_side = max(work_image.size)
-    if largest_side > max_side:
-        scale = max_side / float(largest_side)
-        new_size = (
-            max(1, int(work_image.width * scale)),
-            max(1, int(work_image.height * scale)),
+    api_key = os.getenv("REMOVE_BG_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="REMOVE_BG_API_KEY Render Environment me missing hai.",
         )
-        work_image = work_image.resize(new_size, Image.Resampling.LANCZOS)
 
-    work_buffer = io.BytesIO()
-    work_image.save(work_buffer, format="PNG")
-    work_bytes = work_buffer.getvalue()
+    boundary = "----PrintAIBoundary" + uuid.uuid4().hex
+    safe_filename = os.path.basename(filename or "image.png")
 
-    session = _get_rembg_session()
+    def part(name, value):
+        return (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+            f"{value}\r\n"
+        ).encode("utf-8")
 
-    output_bytes = remove(
-        work_bytes,
-        session=session,
-        force_return_bytes=True,
+    body = io.BytesIO()
+    body.write(
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="image_file"; filename="{safe_filename}"\r\n'
+            f"Content-Type: application/octet-stream\r\n\r\n"
+        ).encode("utf-8")
+    )
+    body.write(input_bytes)
+    body.write(b"\r\n")
+
+    # auto = original suitable output, preserves quality as per API account limits
+    body.write(part("size", "auto"))
+    body.write(part("format", "png"))
+    body.write(f"--{boundary}--\r\n".encode("utf-8"))
+
+    req = urllib.request.Request(
+        "https://api.remove.bg/v1.0/removebg",
+        data=body.getvalue(),
+        method="POST",
+        headers={
+            "X-Api-Key": api_key,
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
     )
 
-    cutout_small = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
-
-    result = _make_print_safe_alpha_cutout(
-        original_image=original,
-        cutout_small=cutout_small,
-        original_size=original_size,
-    )
-
-    if feather > 0:
-        result = _cleanup_alpha_edges(result, feather=feather)
-
-    result = _remove_white_halo(result)
-    return result
+    try:
+        with urllib.request.urlopen(req, timeout=120) as response:
+            output_bytes = response.read()
+            if not output_bytes:
+                raise HTTPException(status_code=500, detail="remove.bg API ne empty output diya.")
+            return output_bytes
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="ignore")
+        raise HTTPException(
+            status_code=e.code,
+            detail=f"remove.bg API error: {error_body or str(e)}",
+        )
+    except urllib.error.URLError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"remove.bg API connection error: {str(e)}",
+        )
 
 
 @app.post("/smart-edit/remove-bg")
@@ -1120,16 +1115,13 @@ async def remove_bg(
     feather: int = Form(0),
 ):
     """
-    Smart Editing Background Remove Pro
+    Smart Editing Background Remove
 
     mode:
-    - ai-pro / best / pro / ai = Render-safe AI background remover
-    - fast = simple corner-color remover
+    - ai-pro / best / pro / ai = remove.bg cloud API, stable for Render
+    - fast = local simple corner-color remover for plain white/light background
 
-    Safety:
-    - AI large image ko internally downscale karke process karta hai.
-    - Final output original image par alpha mask apply karta hai, image blur nahi hoti.
-    - AI fail hone par server crash nahi hoga; fast fallback PNG return karega.
+    बाकी modules को disturb नहीं करता. Output PNG transparent रहेगा.
     """
     try:
         input_bytes = await file.read()
@@ -1138,56 +1130,30 @@ async def remove_bg(
         tolerance = max(5, min(int(tolerance), 140))
 
         if not input_bytes:
-            raise HTTPException(status_code=400, detail="No image file received")
+            raise HTTPException(status_code=400, detail="Uploaded image empty hai.")
 
-        # AI PRO MODE - Render safe
+        # AI PRO MODE: remove.bg API
         if mode in ["ai", "ai-pro", "pro", "best"]:
-            try:
-                result = _ai_remove_bg_render_safe(input_bytes, feather=feather)
+            output_bytes = _remove_bg_with_removebg_api(input_bytes, file.filename)
 
+            # Optional very light edge smooth only if user chooses feather > 0
+            if feather > 0:
+                result = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
+                result = _cleanup_alpha_edges(result, feather=feather)
                 buffer = io.BytesIO()
                 result.save(buffer, format="PNG", optimize=True)
-                buffer.seek(0)
+                output_bytes = buffer.getvalue()
 
-                return Response(
-                    content=buffer.getvalue(),
-                    media_type="image/png",
-                    headers={
-                        "X-PrintAI-BG-Mode": "ai-pro-render-safe",
-                        "X-PrintAI-Status": "success",
-                    },
-                )
+            return Response(
+                content=output_bytes,
+                media_type="image/png",
+                headers={
+                    "X-PrintAI-BG-Mode": "remove-bg-api",
+                    "X-PrintAI-Status": "success",
+                },
+            )
 
-            except Exception as ai_error:
-                # Server ko crash nahi karna. Fast fallback se at least output milega.
-                try:
-                    image = Image.open(io.BytesIO(input_bytes)).convert("RGBA")
-                    result = _simple_corner_background_remove(
-                        image,
-                        tolerance=tolerance,
-                        feather=feather,
-                    )
-
-                    buffer = io.BytesIO()
-                    result.save(buffer, format="PNG", optimize=True)
-                    buffer.seek(0)
-
-                    return Response(
-                        content=buffer.getvalue(),
-                        media_type="image/png",
-                        headers={
-                            "X-PrintAI-BG-Mode": "fast-fallback",
-                            "X-PrintAI-Status": "ai-failed-fallback-used",
-                            "X-PrintAI-AI-Error": str(ai_error)[:160],
-                        },
-                    )
-                except Exception:
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"AI background removal failed: {str(ai_error)}"
-                    )
-
-        # FAST MODE
+        # FAST MODE: existing local simple remover, does not affect other modules
         image = Image.open(io.BytesIO(input_bytes)).convert("RGBA")
         result = _simple_corner_background_remove(
             image,
