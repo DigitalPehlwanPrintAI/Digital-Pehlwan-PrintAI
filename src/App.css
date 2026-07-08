@@ -706,4 +706,40 @@ td {
     width: 100%;
   }
 }
+.auth-message {
+  margin: 12px 0 16px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  color: #111827;
+  background: #fff7d6;
+  border: 1px solid #facc15;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.small-auth-btn {
+  width: 100%;
+  min-height: 42px;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  color: #ffffff;
+  font-weight: 850;
+  background: linear-gradient(135deg, #0797e8, #7c3aed, #e6007e);
+  box-shadow: 0 10px 22px rgba(7, 151, 232, 0.18);
+}
+
+.small-auth-btn:hover {
+  transform: translateY(-1px);
+  filter: saturate(1.12);
+}
+
+.verified-text {
+  margin: 4px 0 8px !important;
+  color: #059669 !important;
+  font-weight: 900 !important;
+  font-size: 13px !important;
+}
 
