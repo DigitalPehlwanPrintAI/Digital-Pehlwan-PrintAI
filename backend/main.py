@@ -60,26 +60,49 @@ def _generate_otp() -> str:
 
 def _send_email_via_gmail_smtp(to_email: str, otp: str, purpose: str):
     """
-    Gmail App Password se OTP email send karta hai.
-    Render par port 465 kabhi-kabhi Network unreachable deta hai,
-    isliye pehle 587 STARTTLS try karta hai, phir 465 SSL fallback.
+    Render par Gmail SMTP ports 465/587 block ho sakte hain.
+    Isliye ab OTP email Brevo HTTP API se bheja jayega.
+
+    Required Render Environment Variables:
+    - BREVO_API_KEY
+    - OTP_EMAIL_USER=verified sender email in Brevo
+    - OTP_EMAIL_FROM_NAME=Digital Pehlwan PrintAI
     """
+    import json
+    import urllib.request
+    import urllib.error
+
+    brevo_api_key = os.getenv("BREVO_API_KEY", "").strip()
     sender_email = os.getenv("OTP_EMAIL_USER", "").strip()
-    app_password = os.getenv("OTP_EMAIL_APP_PASSWORD", "").strip().replace(" ", "")
     from_name = os.getenv("OTP_EMAIL_FROM_NAME", "Digital Pehlwan PrintAI").strip()
 
-    if not sender_email or not app_password:
+    if not brevo_api_key:
         raise HTTPException(
             status_code=500,
-            detail="OTP_EMAIL_USER ya OTP_EMAIL_APP_PASSWORD backend environment me missing hai.",
+            detail="BREVO_API_KEY backend environment me missing hai.",
         )
 
-    msg = EmailMessage()
-    msg["Subject"] = f"Digital Pehlwan PrintAI - {purpose}"
-    msg["From"] = f"{from_name} <{sender_email}>"
-    msg["To"] = to_email
-    msg.set_content(
-        f"""Hello,
+    if not sender_email:
+        raise HTTPException(
+            status_code=500,
+            detail="OTP_EMAIL_USER backend environment me missing hai.",
+        )
+
+    html_content = f"""
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #111827;">
+      <h2>Digital Pehlwan PrintAI OTP Verification</h2>
+      <p>Hello,</p>
+      <p>Your Digital Pehlwan PrintAI OTP is:</p>
+      <div style="font-size: 28px; font-weight: 800; letter-spacing: 4px; margin: 16px 0; color: #2563eb;">
+        {otp}
+      </div>
+      <p><b>Purpose:</b> {purpose}</p>
+      <p>This OTP is valid for 10 minutes. Please do not share this OTP with anyone.</p>
+      <p>Regards,<br/>Digital Pehlwan PrintAI</p>
+    </div>
+    """
+
+    text_content = f"""Hello,
 
 Your Digital Pehlwan PrintAI OTP is: {otp}
 
@@ -90,47 +113,46 @@ This OTP is valid for 10 minutes. Please do not share this OTP with anyone.
 Regards,
 Digital Pehlwan PrintAI
 """
+
+    payload = {
+        "sender": {"name": from_name, "email": sender_email},
+        "to": [{"email": to_email}],
+        "subject": f"Digital Pehlwan PrintAI - {purpose}",
+        "htmlContent": html_content,
+        "textContent": text_content,
+    }
+
+    req = urllib.request.Request(
+        "https://api.brevo.com/v3/smtp/email",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "accept": "application/json",
+            "content-type": "application/json",
+            "api-key": brevo_api_key,
+        },
     )
 
-    context = ssl.create_default_context()
-    smtp_errors = []
-
-    # First try port 587 STARTTLS. This works better on many cloud hosts than 465.
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
-            server.ehlo()
-            server.starttls(context=context)
-            server.ehlo()
-            server.login(sender_email, app_password)
-            server.send_message(msg)
-            return
-    except smtplib.SMTPAuthenticationError:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            response_body = response.read().decode("utf-8", errors="ignore")
+            return response_body
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="ignore")
+        raise HTTPException(
+            status_code=e.code,
+            detail=f"Brevo email API error: {error_body or str(e)}",
+        )
+    except urllib.error.URLError as e:
         raise HTTPException(
             status_code=500,
-            detail="Gmail SMTP authentication failed. App Password galat hai ya Gmail permission issue hai.",
+            detail=f"Brevo email API connection error: {str(e)}",
         )
     except Exception as e:
-        smtp_errors.append(f"587 STARTTLS: {str(e)}")
-
-    # Fallback: port 465 SSL.
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30, context=context) as server:
-            server.login(sender_email, app_password)
-            server.send_message(msg)
-            return
-    except smtplib.SMTPAuthenticationError:
         raise HTTPException(
             status_code=500,
-            detail="Gmail SMTP authentication failed. App Password galat hai ya Gmail permission issue hai.",
+            detail=f"Email send failed: {str(e)}",
         )
-    except Exception as e:
-        smtp_errors.append(f"465 SSL: {str(e)}")
-
-    raise HTTPException(
-        status_code=500,
-        detail="Email send failed. SMTP connection issue: " + " | ".join(smtp_errors),
-    )
-
 
 @app.post("/auth/send-email-otp")
 async def send_email_otp(payload: EmailOtpRequest):
