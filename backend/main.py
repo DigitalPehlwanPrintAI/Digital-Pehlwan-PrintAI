@@ -59,6 +59,11 @@ def _generate_otp() -> str:
 
 
 def _send_email_via_gmail_smtp(to_email: str, otp: str, purpose: str):
+    """
+    Gmail App Password se OTP email send karta hai.
+    Render par port 465 kabhi-kabhi Network unreachable deta hai,
+    isliye pehle 587 STARTTLS try karta hai, phir 465 SSL fallback.
+    """
     sender_email = os.getenv("OTP_EMAIL_USER", "").strip()
     app_password = os.getenv("OTP_EMAIL_APP_PASSWORD", "").strip().replace(" ", "")
     from_name = os.getenv("OTP_EMAIL_FROM_NAME", "Digital Pehlwan PrintAI").strip()
@@ -88,21 +93,43 @@ Digital Pehlwan PrintAI
     )
 
     context = ssl.create_default_context()
+    smtp_errors = []
 
+    # First try port 587 STARTTLS. This works better on many cloud hosts than 465.
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
+            server.ehlo()
+            server.starttls(context=context)
+            server.ehlo()
             server.login(sender_email, app_password)
             server.send_message(msg)
+            return
     except smtplib.SMTPAuthenticationError:
         raise HTTPException(
             status_code=500,
             detail="Gmail SMTP authentication failed. App Password galat hai ya Gmail permission issue hai.",
         )
     except Exception as e:
+        smtp_errors.append(f"587 STARTTLS: {str(e)}")
+
+    # Fallback: port 465 SSL.
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30, context=context) as server:
+            server.login(sender_email, app_password)
+            server.send_message(msg)
+            return
+    except smtplib.SMTPAuthenticationError:
         raise HTTPException(
             status_code=500,
-            detail=f"Email send failed: {str(e)}",
+            detail="Gmail SMTP authentication failed. App Password galat hai ya Gmail permission issue hai.",
         )
+    except Exception as e:
+        smtp_errors.append(f"465 SSL: {str(e)}")
+
+    raise HTTPException(
+        status_code=500,
+        detail="Email send failed. SMTP connection issue: " + " | ".join(smtp_errors),
+    )
 
 
 @app.post("/auth/send-email-otp")
