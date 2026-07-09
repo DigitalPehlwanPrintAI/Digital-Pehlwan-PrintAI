@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from PIL import Image, ImageFilter, ImageEnhance, ImageStat
@@ -8,6 +9,11 @@ import os
 import zipfile
 import struct
 import math
+import random
+import time
+import smtplib
+import ssl
+from email.message import EmailMessage
 
 app = FastAPI(title="Digital Pehlwan PrintAI Backend")
 
@@ -19,6 +25,144 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+
+# =========================================================
+# EMAIL OTP HELPERS
+# =========================================================
+
+OTP_STORE = {}
+OTP_EXPIRY_SECONDS = 10 * 60
+
+
+class EmailOtpRequest(BaseModel):
+    email: str
+    purpose: str = "Signup Email Verification"
+
+
+class EmailOtpVerifyRequest(BaseModel):
+    email: str
+    otp: str
+    purpose: str = "Signup Email Verification"
+
+
+def _normalize_email(email: str) -> str:
+    return str(email or "").strip().lower()
+
+
+def _otp_key(email: str, purpose: str) -> str:
+    return f"{_normalize_email(email)}::{str(purpose or '').strip().lower()}"
+
+
+def _generate_otp() -> str:
+    return str(random.randint(100000, 999999))
+
+
+def _send_email_via_gmail_smtp(to_email: str, otp: str, purpose: str):
+    sender_email = os.getenv("OTP_EMAIL_USER", "").strip()
+    app_password = os.getenv("OTP_EMAIL_APP_PASSWORD", "").strip().replace(" ", "")
+    from_name = os.getenv("OTP_EMAIL_FROM_NAME", "Digital Pehlwan PrintAI").strip()
+
+    if not sender_email or not app_password:
+        raise HTTPException(
+            status_code=500,
+            detail="OTP_EMAIL_USER ya OTP_EMAIL_APP_PASSWORD backend environment me missing hai.",
+        )
+
+    msg = EmailMessage()
+    msg["Subject"] = f"Digital Pehlwan PrintAI - {purpose}"
+    msg["From"] = f"{from_name} <{sender_email}>"
+    msg["To"] = to_email
+    msg.set_content(
+        f"""Hello,
+
+Your Digital Pehlwan PrintAI OTP is: {otp}
+
+Purpose: {purpose}
+
+This OTP is valid for 10 minutes. Please do not share this OTP with anyone.
+
+Regards,
+Digital Pehlwan PrintAI
+"""
+    )
+
+    context = ssl.create_default_context()
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+            server.login(sender_email, app_password)
+            server.send_message(msg)
+    except smtplib.SMTPAuthenticationError:
+        raise HTTPException(
+            status_code=500,
+            detail="Gmail SMTP authentication failed. App Password galat hai ya Gmail permission issue hai.",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Email send failed: {str(e)}",
+        )
+
+
+@app.post("/auth/send-email-otp")
+async def send_email_otp(payload: EmailOtpRequest):
+    email = _normalize_email(payload.email)
+    purpose = str(payload.purpose or "Signup Email Verification").strip()
+
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email required.")
+
+    otp = _generate_otp()
+    key = _otp_key(email, purpose)
+
+    OTP_STORE[key] = {
+        "otp": otp,
+        "expires_at": time.time() + OTP_EXPIRY_SECONDS,
+        "verified": False,
+    }
+
+    _send_email_via_gmail_smtp(email, otp, purpose)
+
+    return {
+        "status": "success",
+        "message": "OTP sent to email.",
+        "email": email,
+        "purpose": purpose,
+        "expires_in_seconds": OTP_EXPIRY_SECONDS,
+    }
+
+
+@app.post("/auth/verify-email-otp")
+async def verify_email_otp(payload: EmailOtpVerifyRequest):
+    email = _normalize_email(payload.email)
+    purpose = str(payload.purpose or "Signup Email Verification").strip()
+    otp = str(payload.otp or "").strip()
+
+    if not email or not otp:
+        raise HTTPException(status_code=400, detail="Email and OTP required.")
+
+    key = _otp_key(email, purpose)
+    record = OTP_STORE.get(key)
+
+    if not record:
+        raise HTTPException(status_code=400, detail="OTP not found. Please send OTP again.")
+
+    if time.time() > record["expires_at"]:
+        OTP_STORE.pop(key, None)
+        raise HTTPException(status_code=400, detail="OTP expired. Please send OTP again.")
+
+    if record["otp"] != otp:
+        raise HTTPException(status_code=400, detail="Invalid OTP. Please enter correct OTP.")
+
+    record["verified"] = True
+
+    return {
+        "status": "success",
+        "message": "OTP verified successfully.",
+        "email": email,
+        "purpose": purpose,
+    }
 
 # =========================================================
 # BASIC HELPERS
